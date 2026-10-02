@@ -1,0 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SynthesizeNarration",
+      "Effect": "Allow",
+      "Action": ["polly:SynthesizeSpeech"],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ReadDrillHistory",
+      "Effect": "Allow",
+      "Action": ["dynamodb:Query"],
+      "Resource": "arn:aws:dynamodb:ap-south-1:851011315242:table/campusevac-events"
+    },
+    {
+      "Sid": "HoldPendingReports",
+      "Effect": "Allow",
+      "Action": ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:DeleteItem"],
+      "Resource": "arn:aws:dynamodb:ap-south-1:851011315242:table/campusevac-events"
+    },
+    {
+      "Sid": "SendDrillReports",
+      "Effect": "Allow",
+      "Action": ["ses:SendEmail"],
+      "Resource": "arn:aws:ses:ap-south-1:851011315242:identity/*"
+    },
+    {
+      "Sid": "VerifyRecipients",
+      "Effect": "Allow",
+      "Action": ["ses:GetEmailIdentity", "ses:CreateEmailIdentity", "ses:DeleteEmailIdentity"],
+      "Resource": "*"
+    }
+  ]
+}
