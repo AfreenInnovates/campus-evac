@@ -1,0 +1,2 @@
+# The web app is all Vercel needs. infra/ is deployed separately to AWS with the CDK.
+infra
