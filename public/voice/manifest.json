@@ -1,0 +1,103 @@
+{
+  "voice": "Matthew",
+  "engine": "neural",
+  "generated": "2026-09-18T18:26:37.354Z",
+  "clips": {
+    "brief-1": {
+      "file": "brief-1.3f9ffe63ee.mp3",
+      "ms": 7920
+    },
+    "brief-2": {
+      "file": "brief-2.0f81b5a6da.mp3",
+      "ms": 11736
+    },
+    "brief-3": {
+      "file": "brief-3.a1f158d8f7.mp3",
+      "ms": 8760
+    },
+    "brief-4": {
+      "file": "brief-4.ff54769f1f.mp3",
+      "ms": 12096
+    },
+    "room-lobby": {
+      "file": "room-lobby.6539b46572.mp3",
+      "ms": 7584
+    },
+    "room-wcorr": {
+      "file": "room-wcorr.a799a5d570.mp3",
+      "ms": 4536
+    },
+    "room-sec": {
+      "file": "room-sec.ad39d38e88.mp3",
+      "ms": 7392
+    },
+    "room-ecorr": {
+      "file": "room-ecorr.48fdf8b58f.mp3",
+      "ms": 4824
+    },
+    "room-vault": {
+      "file": "room-vault.54ae89207c.mp3",
+      "ms": 5088
+    },
+    "room-annex": {
+      "file": "room-annex.307558785e.mp3",
+      "ms": 5160
+    },
+    "done-emergency-backpack": {
+      "file": "done-emergency-backpack.9e69db3015.mp3",
+      "ms": 1272
+    },
+    "done-lab-access-card": {
+      "file": "done-lab-access-card.a4c3ed9311.mp3",
+      "ms": 1440
+    },
+    "done-gas-valve": {
+      "file": "done-gas-valve.372faa0265.mp3",
+      "ms": 3072
+    },
+    "done-first-aid-kit": {
+      "file": "done-first-aid-kit.43b7603f6a.mp3",
+      "ms": 2952
+    },
+    "done-lab-safety-clue": {
+      "file": "done-lab-safety-clue.d0dd3a3308.mp3",
+      "ms": 1176
+    },
+    "done-academic-guide": {
+      "file": "done-academic-guide.db2c88c988.mp3",
+      "ms": 1104
+    },
+    "done-main-exit": {
+      "file": "done-main-exit.e83fbbebe8.mp3",
+      "ms": 2376
+    },
+    "next-emergency-backpack": {
+      "file": "next-emergency-backpack.a97f22efe8.mp3",
+      "ms": 5568
+    },
+    "next-lab-access-card": {
+      "file": "next-lab-access-card.c4ca7dc57b.mp3",
+      "ms": 7296
+    },
+    "next-gas-valve": {
+      "file": "next-gas-valve.8d64631ee0.mp3",
+      "ms": 7416
+    },
+    "next-first-aid-kit": {
+      "file": "next-first-aid-kit.15d122af91.mp3",
+      "ms": 6096
+    },
+    "next-lab-safety-clue": {
+      "file": "next-lab-safety-clue.7496de0ac5.mp3",
+      "ms": 4392
+    },
+    "next-academic-guide": {
+      "file": "next-academic-guide.6bb4493252.mp3",
+      "ms": 8688
+    },
+    "next-main-exit": {
+      "file": "next-main-exit.435d4f7174.mp3",
+      "ms": 5880
+    }
+  }
+}
