@@ -5,7 +5,7 @@ import type { LabConfig } from "./engine";
 import { MAX_RULES, resetTraining, unlockTraining, usePlaybook, type PointTag, type TrainingPoint } from "./playbook";
 import { placeName } from "./world";
 import { listReplays, type Replay } from "./replay";
-import { SCENARIOS } from "./world";
+import { plan, SCENARIOS } from "./world";
 
 /**
  * Training the warden, and seeing it improve.
@@ -39,6 +39,8 @@ export function trainingPlan(setup: TrainingSetup, people = 12): QueueItem[] {
       seed: setup.samePeople ? 7 : 7 + i * 13,
       wardenEvery: 12,
       playbook: true,
+      // training runs in whichever building is in use
+      building: plan.spec,
     },
     tag: "train",
     learn: true,

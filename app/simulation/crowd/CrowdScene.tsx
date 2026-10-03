@@ -9,15 +9,17 @@ import Building from "../components/Building";
 import Exterior from "../components/Exterior";
 import Rooms from "../components/Rooms";
 import { Glow } from "../components/Decor";
-import { ROOMS, roomHeight, SUN_DIRECTION } from "../level";
+import { SUN_DIRECTION } from "../level";
 import { clampDt } from "../runtime";
 import { buildGrid } from "./nav";
 import { lab, step, useLab } from "./engine";
 import { create } from "zustand";
-import { fireSpot, floorHeight, INDOOR, LINKS, placeName, roomCenter, smokeAt, WEST_STEPS } from "./world";
+import { fireSpot, floorHeight, INDOOR, LINKS, placeName, plan, roomById, roomCenter, smokeAt, usePlan, WEST_STEPS, type Plan } from "./world";
 import Human from "./Human";
 import { hasFix } from "./fixes";
-import { addFrames, emptyHeat, HEAT, paintHeat } from "./heat";
+import { addCrowdFrames, addFrames, emptyHeat, heatArea, paintHeat } from "./heat";
+import CrowdInstances from "./CrowdInstances";
+import DesignedBuilding from "./DesignedBuilding";
 
 /** Which person the spectator camera is riding along with, and whether the map is ready. */
 export const useSpectator = create<{ follow: number | null; navReady: boolean; heat: boolean }>(() => ({ follow: null, navReady: false, heat: false }));
@@ -29,6 +31,8 @@ function NavBuilder() {
   const { world, rapier } = useRapier();
   // colliders mount over a few frames; build once their count has held steady for a few frames
   const watch = useRef({ last: -1, stable: 0, done: false });
+  // a new building: wait for it to be read before anyone can sound the alarm
+  useEffect(() => useSpectator.setState({ navReady: false }), []);
   useFrame(() => {
     const w = watch.current;
     if (w.done) return;
@@ -41,7 +45,9 @@ function NavBuilder() {
     const shape = new rapier.Cuboid(0.24, 0.45, 0.24);
     const rotation = { x: 0, y: 0, z: 0, w: 1 };
     const probe = (x: number, z: number) => world.intersectionWithShape({ x, y: 0.9, z }, rotation, shape) !== null;
-    lab.grid = buildGrid(probe);
+    // the building plus a margin outside it, so people can walk clear of the doors
+    const b = plan.bounds;
+    lab.grid = buildGrid(probe, { minX: b.minX - 9, maxX: b.maxX + 9, minZ: b.minZ - 8, maxZ: b.maxZ + 18 });
     useSpectator.setState({ navReady: true });
   });
   return null;
@@ -228,8 +234,9 @@ function WestSteps() {
 /** Seen by the spectator, never by the warden's camera: an orange glow must not read as fire. */
 const SPECTATOR_ONLY = 1;
 
-function HeatOverlay() {
+function HeatOverlay({ plan: current }: { plan: Plan }) {
   const on = useSpectator((s) => s.heat);
+  const area = heatArea(current.bounds);
   const get = useThree((s) => s.get);
   useEffect(() => {
     get().camera.layers.enable(SPECTATOR_ONLY);
@@ -247,7 +254,10 @@ function HeatOverlay() {
     if (since.current < 2) return;
     since.current = 0;
     const frames = lab.playback?.frames ?? lab.rec.frames;
-    const image = paintHeat(addFrames(emptyHeat(), frames, lab.agents.length));
+    const heat = addFrames(emptyHeat(heatArea(plan.bounds)), frames, lab.agents.length);
+    const crowd = lab.playback?.crowd ?? lab.rec.crowd;
+    if (crowd.length) addCrowdFrames(heat, crowd);
+    const image = paintHeat(heat);
     if (!m.map) {
       m.map = new THREE.CanvasTexture(image);
       m.map.colorSpace = THREE.SRGBColorSpace;
@@ -260,8 +270,8 @@ function HeatOverlay() {
   });
   // stays mounted, so its one texture is reused rather than rebuilt on every toggle
   return (
-    <mesh visible={on} layers={SPECTATOR_ONLY} position={[(HEAT.minX + HEAT.maxX) / 2, 0.07, (HEAT.minZ + HEAT.maxZ) / 2]} rotation={[-Math.PI / 2, 0, 0]} renderOrder={9}>
-      <planeGeometry args={[HEAT.maxX - HEAT.minX, HEAT.maxZ - HEAT.minZ]} />
+    <mesh visible={on} layers={SPECTATOR_ONLY} position={[(area.minX + area.maxX) / 2, 0.07, (area.minZ + area.maxZ) / 2]} rotation={[-Math.PI / 2, 0, 0]} renderOrder={9}>
+      <planeGeometry args={[area.maxX - area.minX, area.maxZ - area.minZ]} />
       <meshBasicMaterial ref={material} transparent opacity={0} depthWrite={false} toneMapped={false} />
     </mesh>
   );
@@ -326,11 +336,11 @@ function SmokeHaze() {
   return (
     <>
       {INDOOR.map((room, i) => {
-        const b = ROOMS.find((r) => r.id === room)!.bounds;
+        const { bounds: b, height } = roomById(room);
         return (
           <mesh
             key={room}
-            position={[(b.minX + b.maxX) / 2, Math.min(2.4, roomHeight(room) - 1.2), (b.minZ + b.maxZ) / 2]}
+            position={[(b.minX + b.maxX) / 2, Math.min(2.4, height - 1.2), (b.minZ + b.maxZ) / 2]}
             rotation={[-Math.PI / 2, 0, 0]}
             material={materials[i]}
             renderOrder={8}
@@ -345,9 +355,14 @@ function SmokeHaze() {
 
 /* ------------------------------------------------------------------ the warden's camera */
 
-const CAM = { minX: -27, maxX: 27, minZ: -47, maxZ: 19.5 };
 const SHOT_W = 1024;
-const SHOT_H = Math.round((SHOT_W * (CAM.maxZ - CAM.minZ)) / (CAM.maxX - CAM.minX));
+
+/** What the ceiling camera takes in: the building and a margin round it, at a fixed image width. */
+function cctvFrame(current: Plan) {
+  const b = current.bounds;
+  const CAM = { minX: b.minX - 5, maxX: b.maxX + 5, minZ: b.minZ - 4, maxZ: b.maxZ + 9 };
+  return { CAM, SHOT_H: Math.round((SHOT_W * (CAM.maxZ - CAM.minZ)) / (CAM.maxX - CAM.minX)) };
+}
 
 /**
  * A fixed ceiling camera looking straight down on the whole building. When the warden asks
@@ -355,7 +370,8 @@ const SHOT_H = Math.round((SHOT_W * (CAM.maxZ - CAM.minZ)) / (CAM.maxX - CAM.min
  * be: room names, the exits, and a numbered tag on each person, so the vision model can
  * refer to people by number.
  */
-function CCTV() {
+function CCTV({ plan: current }: { plan: Plan }) {
+  const { CAM, SHOT_H } = useMemo(() => cctvFrame(current), [current]);
   const gl = useThree((s) => s.gl);
   const scene = useThree((s) => s.scene);
   const camera = useMemo(() => {
@@ -370,12 +386,12 @@ function CCTV() {
     cam.bottom = -CAM.maxZ;
     cam.updateProjectionMatrix();
     return cam;
-  }, []);
+  }, [CAM]);
   const target = useMemo(() => {
     const rt = new THREE.WebGLRenderTarget(SHOT_W, SHOT_H);
     rt.texture.colorSpace = THREE.SRGBColorSpace;
     return rt;
-  }, []);
+  }, [SHOT_H]);
 
   useEffect(() => {
     const pixels = new Uint8Array(SHOT_W * SHOT_H * 4);
@@ -423,6 +439,13 @@ function CCTV() {
         ctx.fillText("EXIT", px(x), pz(z));
       }
       ctx.font = "bold 15px sans-serif";
+      for (const f of lab.crowd) {
+        if (f.status === "safe") continue;
+        ctx.beginPath();
+        ctx.arc(px(f.x), pz(f.z), 4, 0, Math.PI * 2);
+        ctx.fillStyle = f.status === "down" ? "#222" : "#d8d2dc";
+        ctx.fill();
+      }
       for (const agent of lab.agents) {
         if (agent.status === "safe") continue;
         const x = px(agent.x);
@@ -449,15 +472,26 @@ function CCTV() {
     return () => {
       lab.capture = null;
     };
-  }, [gl, scene, camera, target]);
+  }, [gl, scene, camera, target, CAM, SHOT_H]);
 
   return null;
 }
 
 /* ------------------------------------------------------------------ spectator camera */
 
-function Spectator() {
+function Spectator({ plan: current }: { plan: Plan }) {
   const controls = useRef<React.ComponentRef<typeof OrbitControls>>(null);
+  // a new building: look at all of it from above and a little to the south
+  useEffect(() => {
+    const c = controls.current;
+    if (!c) return;
+    const b = current.bounds;
+    const size = Math.max(b.maxX - b.minX, b.maxZ - b.minZ);
+    const cz = (b.minZ + b.maxZ) / 2;
+    c.target.set((b.minX + b.maxX) / 2, 0, cz);
+    c.object.position.set((b.minX + b.maxX) / 2, size * 1.1, cz + size * 0.85);
+    c.update();
+  }, [current]);
   const goal = useMemo(() => new THREE.Vector3(0, 0, -15), []);
   const eye = useMemo(() => new THREE.Vector3(), []);
   // when you pick someone, the camera swoops down behind their shoulder, then rides along
@@ -527,6 +561,7 @@ function Loop() {
 const SUN = new THREE.Vector3(...SUN_DIRECTION).normalize();
 
 export default memo(function CrowdScene() {
+  const current = usePlan((s) => s.plan)!;
   return (
     <Canvas
       shadows="percentage"
@@ -551,21 +586,28 @@ export default memo(function CrowdScene() {
           shadow-camera-far={160}
           shadow-bias={-0.0004}
         />
-        <Physics paused>
-          <Exterior />
-          <Building />
-          <Rooms />
+        <Physics key={current.id} paused>
+          {current.demo ? (
+            <>
+              <Exterior />
+              <Building />
+              <Rooms />
+            </>
+          ) : (
+            <DesignedBuilding plan={current} />
+          )}
           <NavBuilder />
         </Physics>
-        <StaticShadows />
+        <StaticShadows key={`shadows-${current.id}`} />
         <People />
-        <WestSteps />
-        <HeatOverlay />
-        <Signposts />
+        <CrowdInstances />
+        {current.demo && <WestSteps />}
+        <HeatOverlay plan={current} />
+        <Signposts key={`signs-${current.id}`} />
         <Fire />
-        <SmokeHaze />
-        <CCTV />
-        <Spectator />
+        <SmokeHaze key={`smoke-${current.id}`} />
+        <CCTV key={`cctv-${current.id}`} plan={current} />
+        <Spectator plan={current} />
         <Loop />
       </Suspense>
     </Canvas>

@@ -1,12 +1,13 @@
 "use client";
 
 import { create } from "zustand";
-import { roomAt, roomById, type RoomId } from "../level";
-import { cellOf, findPath, walkable, type NavGrid } from "./nav";
+import { cellOf, findPath, walkable, withBlockedDisc, type NavGrid } from "./nav";
 import { costOf, type CrowdTask } from "./prompts";
 import { adoptRules, nextDrillNumber, standingOrders, usePlaybook } from "./playbook";
 import { judge, nextHop, parseTarget, type Order, type Target } from "./orders";
 import { hasFix, type FixId } from "./fixes";
+import { counts as crowdCounts, crowdFrame, applyCrowdFrame, hearBroadcast, separate, spawnCrowd, stepCrowd, type Follower } from "./crowd";
+import { planFor, type BuildingSpec } from "./floorplan";
 import { FIELDS, FRAME_EVERY, ORDER, PACE, STATUS, type Replay } from "./replay";
 import {
   compass,
@@ -19,12 +20,21 @@ import {
   linksOf,
   otherSide,
   placeName,
+  DEMO_PLAN,
+  FIRE_BURN,
+  FIRE_REACH,
+  plan,
+  roomAt,
+  roomById,
   roomCenter,
   SCENARIOS,
+  setPlan,
   signFrom,
   smokeAt,
+  smokeDose,
   smokeWord,
   type Link,
+  type RoomId,
   type P2,
   type Scenario,
 } from "./world";
@@ -129,7 +139,10 @@ function castPeople(count: number, random: () => number): Persona[] {
 
 /** What the warden's records say about a person, the way a real Personal Emergency Evacuation Plan would. */
 export function needsOf(persona: Persona) {
-  if (persona.stepFree) return `wheelchair user: needs a step-free route${fixed("ramp") ? "" : "; cannot use the WEST FIRE EXIT (steps)"}`;
+  if (persona.stepFree) {
+    const stepped = LINKS.filter((link) => link.exit && link.steps && !fixed("ramp")).map((link) => `${link.exit!.toUpperCase()} FIRE EXIT`);
+    return `wheelchair user: needs a step-free route${stepped.length ? `; cannot use the ${stepped.join(" or ")} (steps)` : ""}`;
+  }
   if (persona.deaf) return "deaf: cannot hear the alarm or the PA; an order only reaches them if someone in the same room passes it on";
   if (persona.kind === "elderly") return "elderly, walks with a cane: slow, cannot crawl";
   return "";
@@ -213,6 +226,8 @@ export interface LabConfig {
   playbook: boolean;
   /** changes made to the building or the plan, for testing whether they help */
   fixes?: FixId[];
+  /** a designed floor; none for the demo campus */
+  building?: BuildingSpec;
 }
 
 export interface WardenTurn {
@@ -265,6 +280,8 @@ export const lab = {
   scenario: null as Scenario | null,
   hops: {} as Record<string, number>,
   grid: null as NavGrid | null,
+  /** this drill's walking map: the building's, with the fire blocked off */
+  walk: null as NavGrid | null,
   agents: [] as Agent[],
   t: 0,
   running: false,
@@ -285,7 +302,9 @@ export const lab = {
   /** the last thing the warden said to each person by number, so it can stay consistent */
   told: new Map<number, { t: number; message: string }>(),
   /** the drill as it is being recorded */
-  rec: { frames: [] as number[][], strings: new Map<string, number>(), thoughts: [] as string[], targets: [] as string[], targetIds: new Map<string, number>(), nextAt: 0 },
+  rec: { frames: [] as number[][], crowd: [] as number[][], strings: new Map<string, number>(), thoughts: [] as string[], targets: [] as string[], targetIds: new Map<string, number>(), nextAt: 0 },
+  /** everyone who is not an AI person: they follow the crowd, the signs and the announcements */
+  crowd: [] as Follower[],
   /** a recorded drill being played back instead of a live one */
   playback: null as Replay | null,
   /** playback speed; live drills always run in real time */
@@ -310,15 +329,18 @@ const fixed = (id: FixId) => hasFix(lab.config?.fixes, id);
 const hidesSigns = (smoke: number) => smoke > (fixed("low-signs") ? 0.8 : 0.45);
 
 /** The exit closest to a spot by walking distance, among those this person can use. */
-function nearestExitFor(agent: Agent) {
-  if (!lab.grid) return null;
+const nearestExitFor = (agent: Agent) => nearestExitFrom(agent.x, agent.z, (link) => impassable(agent, link));
+
+function nearestExitFrom(x0: number, z0: number, blocked: (link: Link) => boolean = () => false) {
+  const map = lab.walk ?? lab.grid;
+  if (!map) return null;
   let best: { exit: string; length: number } | null = null;
   for (const link of LINKS) {
-    if (!link.exit || impassable(agent, link)) continue;
-    const path = findPath(lab.grid, [agent.x, agent.z], link.door);
+    if (!link.exit || blocked(link)) continue;
+    const path = findPath(map, [x0, z0], link.door);
     if (!path) continue;
     let length = 0;
-    let [px, pz] = [agent.x, agent.z];
+    let [px, pz] = [x0, z0];
     for (const [x, z] of path) {
       length += Math.hypot(x - px, z - pz);
       [px, pz] = [x, z];
@@ -360,6 +382,7 @@ function recordFrame() {
     );
   }
   rec.frames.push(frame);
+  if (lab.crowd.length) rec.crowd.push(crowdFrame(lab.crowd, lab.t));
 }
 
 /** A seeded generator, so the same seed puts the same people in the same places. */
@@ -373,23 +396,42 @@ function rng(seed: number) {
   };
 }
 
-/** Where people can be when the alarm goes: anywhere indoors, more of them in the bigger rooms. */
-const SPAWN_ROOMS = INDOOR.filter((room) => room !== "entry").map((room) => {
-  const b = roomById(room).bounds;
-  return { room, area: (b.maxX - b.minX) * (b.maxZ - b.minZ) };
-});
-const SPAWN_AREA = SPAWN_ROOMS.reduce((sum, r) => sum + r.area, 0);
-
+/** Where people can be when the alarm goes on the demo campus: anywhere indoors, more of them in the bigger rooms. */
 function spawnRoom(random: () => number): RoomId {
-  let pick = random() * SPAWN_AREA;
-  for (const r of SPAWN_ROOMS) {
+  const rooms = INDOOR.filter((room) => room !== "entry").map((room) => {
+    const b = roomById(room).bounds;
+    return { room, area: (b.maxX - b.minX) * (b.maxZ - b.minZ) };
+  });
+  let pick = random() * rooms.reduce((sum, r) => sum + r.area, 0);
+  for (const r of rooms) {
     pick -= r.area;
     if (pick <= 0) return r.room;
   }
-  return SPAWN_ROOMS[0].room;
+  return rooms[0].room;
+}
+
+/**
+ * On a designed floor, which rooms the AI people are in: spread across the occupied rooms in
+ * proportion to how many people each holds, one per room first while there are enough.
+ */
+function aiRooms(budget: number): RoomId[] {
+  const rooms = plan.rooms.filter((room) => (room.people ?? 0) > 0).sort((a, b) => (b.people ?? 0) - (a.people ?? 0));
+  const left = new Map(rooms.map((room) => [room.id, room.people ?? 0]));
+  const picked: RoomId[] = [];
+  while (picked.length < budget && [...left.values()].some((n) => n > 0)) {
+    for (const room of rooms) {
+      if (picked.length >= budget) break;
+      if ((left.get(room.id) ?? 0) <= 0) continue;
+      picked.push(room.id);
+      left.set(room.id, left.get(room.id)! - 1);
+    }
+  }
+  return picked;
 }
 
 export function setupRun(config: LabConfig) {
+  const wanted = config.building ? planFor(config.building) : DEMO_PLAN;
+  if (plan.id !== wanted.id) setPlan(wanted);
   const scenario = SCENARIOS.find((item) => item.id === config.scenarioId) ?? SCENARIOS[0];
   const random = rng(config.seed);
   lab.runId++;
@@ -408,7 +450,7 @@ export function setupRun(config: LabConfig) {
   lab.agents = [];
   lab.told = new Map();
   lab.playback = null;
-  lab.rec = { frames: [], strings: new Map(), thoughts: [], targets: [], targetIds: new Map(), nextAt: 0 };
+  lab.rec = { frames: [], crowd: [], strings: new Map(), thoughts: [], targets: [], targetIds: new Map(), nextAt: 0 };
   const playbook = usePlaybook.getState().playbook;
   const useOrders = config.warden === "ai" && config.playbook && playbook.rules.length > 0;
   lab.orders = useOrders ? standingOrders(playbook) : "";
@@ -416,9 +458,13 @@ export function setupRun(config: LabConfig) {
   lab.ruleCount = useOrders ? playbook.rules.length : 0;
 
   const grid = lab.grid;
-  const cast = castPeople(config.agents, random);
-  for (let i = 0; i < config.agents; i++) {
-    const room = spawnRoom(random);
+  const [fireX, fireZ] = fireSpot(scenario.origin);
+  lab.walk = grid ? withBlockedDisc(grid, fireX, fireZ, FIRE_REACH) : null;
+  const placed = plan.demo ? null : aiRooms(config.agents);
+  const aiCount = placed ? placed.length : config.agents;
+  const cast = castPeople(aiCount, random);
+  for (let i = 0; i < aiCount; i++) {
+    const room = placed ? placed[i] : spawnRoom(random);
     const [cx, cz] = roomCenter(room);
     const b = roomById(room).bounds;
     let x = cx;
@@ -428,7 +474,7 @@ export function setupRun(config: LabConfig) {
       const px = b.minX + 0.7 + random() * (b.maxX - b.minX - 1.4);
       const pz = b.minZ + 0.7 + random() * (b.maxZ - b.minZ - 1.4);
       if (roomAt(px, pz) !== room) continue;
-      if (grid && !walkable(grid, ...cellOf(px, pz))) continue;
+      if (grid && !walkable(grid, ...cellOf(grid, px, pz))) continue;
       if (lab.agents.some((other) => Math.hypot(other.x - px, other.z - pz) < 0.9)) continue;
       x = px;
       z = pz;
@@ -480,6 +526,11 @@ export function setupRun(config: LabConfig) {
     });
   }
   for (const agent of lab.agents) agent.nearestExit = nearestExitFor(agent);
+  // everyone else in each room of a designed floor; their nearest exit is worked out once per room
+  const others = new Map<RoomId, number>();
+  if (placed) for (const room of plan.rooms) others.set(room.id, Math.max(0, (room.people ?? 0) - placed.filter((id) => id === room.id).length));
+  const nearest = new Map<RoomId, string | null>([...others.keys()].map((room) => [room, nearestExitFrom(...roomCenter(room))]));
+  lab.crowd = spawnCrowd(new Map([...others].filter(([, n]) => n > 0)), random, grid, nearest, 1000);
   note("system", `${scenario.label}. ${config.agents} people inside. Warden: ${config.warden === "ai" ? "AI (vision)" : config.warden === "human" ? "you" : "none"}.`, undefined, {
     type: "start",
     room: placeName(scenario.origin),
@@ -522,7 +573,10 @@ async function callModel(task: CrowdTask, input: string, image?: string) {
 
 /* ------------------------------------------------------------------ perception */
 
-const LETTERS = "ABCDEFG";
+// one letter per doorway a person can see; a designed floor's corridor can have a dozen or more
+const LETTERS = "ABCDEFGHIJKLMNOP";
+/** In a big room, only the nearest doorways are worth listing; every way outside is always listed. */
+const MAX_OPTIONS = 8;
 
 function healthWord(health: number) {
   return health > 80 ? "fine" : health > 55 ? "coughing" : health > 30 ? "struggling to breathe" : "dizzy and weak";
@@ -541,16 +595,21 @@ function perceive(agent: Agent) {
   // a wheelchair cannot go down steps: that doorway is not an option, only a dead end in view
   const steps = linksOf(here).filter((link) => impassable(agent, link));
   if (steps.length && !agent.blockedAt) agent.blockedAt = placeName(here);
-  const options = linksOf(here).filter((link) => !steps.includes(link)).map((link, i) => {
+  const distance = (link: Link) => Math.hypot(link.door[0] - agent.x, link.door[1] - agent.z);
+  const usable = linksOf(here)
+    .filter((link) => !steps.includes(link))
+    .sort((a, b) => distance(a) - distance(b));
+  const listed = [...usable.filter((link) => link.exit), ...usable.filter((link) => !link.exit)].slice(0, Math.max(MAX_OPTIONS, usable.filter((link) => link.exit).length));
+  const options = usable.filter((link) => listed.includes(link)).map((link, i) => {
     const beyond = otherSide(link, here);
     const beyondSmoke = smokeAt(beyond, t, lab.hops);
     const heading = lab.agents.filter((other) => other !== agent && other.status === "inside" && other.via === link).length;
     const parts = [
-      `${LETTERS[i]}) doorway to the ${compass([agent.x, agent.z], link.door)}, sign: ${blind ? "you cannot read it through the smoke" : `"${signFrom(link, here)}"`}`,
+      `${LETTERS[i]}) doorway ${Math.round(distance(link))} m to the ${compass([agent.x, agent.z], link.door)}, sign: ${blind ? "you cannot read it through the smoke" : `"${signFrom(link, here)}"`}`,
       beyond === "outside"
         ? blind
-          ? "cooler air is coming through it"
-          : "beyond it: open air outside"
+          ? "a way OUTSIDE: cooler, fresher air is blowing in through it"
+          : "beyond it: OUTSIDE, open air"
         : blind
           ? beyond === origin && t > 4
             ? "an orange glow through the smoke"
@@ -610,7 +669,8 @@ function perceive(agent: Agent) {
 
 function goThrough(agent: Agent, link: Link, from: RoomId = agent.room) {
   const target = farPoint(link, from);
-  const path = lab.grid ? findPath(lab.grid, [agent.x, agent.z], target) : [target];
+  const map = lab.walk ?? lab.grid;
+  const path = map ? findPath(map, [agent.x, agent.z], target) : [target];
   if (!path) return false;
   agent.path = path;
   agent.leg = 0;
@@ -695,7 +755,8 @@ async function decide(agent: Agent) {
 
 /* ------------------------------------------------------------------ the warden */
 
-const PLAN = (() => {
+/** The building as the warden is told it: every room's doorways with compass directions, and the exits. Built from the current plan. */
+function planText() {
   const rooms = new Map<string, string[]>();
   for (const link of LINKS) {
     for (const [from, to] of [
@@ -710,12 +771,17 @@ const PLAN = (() => {
       rooms.set(from, list);
     }
   }
+  const exits = LINKS.filter((link) => link.exit).map((link) => {
+    const room = link.a === "outside" ? link.b : link.a;
+    const access = link.steps && !fixed("ramp") ? "opens onto steps down, so no wheelchair can use it" : link.steps ? "ramped, step-free" : "step-free";
+    return `${link.exit === "main" ? "MAIN EXIT" : `${link.exit!.toUpperCase()} FIRE EXIT`} (${placeName(room)}, ${compass(roomCenter(room), link.door)} wall; ${access})`;
+  });
   return [
     "Building plan (single storey). Compass: north is the top of the camera image, south the bottom, west the left, east the right. Evacuees use the same compass words.",
-    ...[...rooms.entries()].map(([room, list]) => `- ${placeName(room as RoomId)} connects to: ${list.join("; ")}`),
-    "Exits: MAIN EXIT (south, through the Main Entrance, step-free), WEST FIRE EXIT (Library west wall; WEST_STEPS), EAST FIRE EXIT (Cafeteria east wall, step-free), NORTH FIRE EXIT (Sports Hall north wall, step-free, out to the sports field). The north wing (Lecture Theatre, Computer Lab, Sports Hall) is reached only through the North Corridor, from the Main Hall or the Cafeteria. The Electrical Service room is a dead end.",
+    ...[...rooms.entries()].map(([room, list]) => `- ${placeName(room)} connects to: ${list.join("; ")}`),
+    `Exits: ${exits.join(", ")}.`,
   ].join("\n");
-})();
+}
 
 function deliver(text: string, people: number[] | null, kind: "warden" | "human", target: Target | null = null) {
   const clean = text.trim().slice(0, 240);
@@ -746,6 +812,7 @@ function deliver(text: string, people: number[] | null, kind: "warden" | "human"
     const delay = fixed("voice-alarm") ? Math.min(agent.persona.hearingDelay, 3) : agent.persona.hearingDelay;
     agent.pendingHear.push({ t: lab.t + delay, text: clean, direct, target: direct ? target : null });
   }
+  if (!people) hearBroadcast(lab.crowd, clean, lab.t);
   note(kind, people ? `To #${people.join(", #")}: “${clean}”` : `PA: “${clean}”`, undefined, { type: "announce", text: clean, people });
 }
 
@@ -767,6 +834,18 @@ export function humanBroadcast(text: string) {
     for (const id of people) lab.told.set(id, { t: lab.t, message });
   } else deliver(text, null, "human");
   publish(true);
+}
+
+/** The unnumbered people still inside, counted by room: they follow your announcements and each other. */
+function crowdRollCall() {
+  const byRoom = new Map<RoomId, number>();
+  for (const f of lab.crowd) if (f.status === "inside") byRoom.set(f.room, (byRoom.get(f.room) ?? 0) + 1);
+  if (!byRoom.size) return "";
+  const total = [...byRoom.values()].reduce((a, b) => a + b, 0);
+  return `Also still inside, not numbered (they cannot be addressed by number; they follow your announcements to everyone, and the people around them): ${total} people - ${[...byRoom]
+    .sort((a, b) => b[1] - a[1])
+    .map(([room, n]) => `${placeName(room)}: ${n}`)
+    .join(", ")}.`;
 }
 
 async function wardenTurn() {
@@ -796,6 +875,7 @@ async function wardenTurn() {
             .join(", ")}.`
         : "",
       `Already out and safe (give them no more orders): ${out.length ? out.map((a) => `#${a.id}`).join(", ") : "nobody yet"}.`,
+      crowdRollCall(),
       unordered.length ? `Still inside with no personal order from you yet: ${unordered.map((a) => `#${a.id}`).join(", ")}.` : "",
     ]
       .filter(Boolean)
@@ -808,7 +888,7 @@ async function wardenTurn() {
       : "";
     const think = await callModel(
       "warden-think",
-      [PLAN.replace("WEST_STEPS", fixed("ramp") ? "ramped, step-free" : "opens onto steps down, so no wheelchair can use it"), "", ...(lab.orders ? [lab.orders, ""] : []), status, ...(memory ? ["", memory] : []), "", "CCTV analyst report of the newest frame:", turn.report || "(no report)", "", previous.length ? `Your previous announcements:\n${previous.join("\n")}` : "You have made no announcements yet."].join("\n"),
+      [planText(), "", ...(lab.orders ? [lab.orders, ""] : []), status, ...(memory ? ["", memory] : []), "", "CCTV analyst report of the newest frame:", turn.report || "(no report)", "", previous.length ? `Your previous announcements:\n${previous.join("\n")}` : "You have made no announcements yet."].join("\n"),
     );
     if (runId !== lab.runId) return;
     turn.reasoning = think.reasoning ?? "";
@@ -941,7 +1021,8 @@ export function step(dt: number) {
       if (!agent.path) {
         const exits = LINKS.filter((link) => link.exit && !impassable(agent, link));
         const exit = agent.via?.exit ? agent.via : exits.sort((a, b) => Math.hypot(a.pb[0] - agent.x, a.pb[1] - agent.z) - Math.hypot(b.pb[0] - agent.x, b.pb[1] - agent.z))[0];
-        agent.path = (lab.grid && findPath(lab.grid, [agent.x, agent.z], exit.pb)) || [exit.pb];
+        const map = lab.walk ?? lab.grid;
+        agent.path = (map && findPath(map, [agent.x, agent.z], exit.pb)) || [exit.pb];
         agent.leg = 0;
       }
       continue;
@@ -950,10 +1031,10 @@ export function step(dt: number) {
     // smoke and flames
     const smoke = smokeAt(room, t, lab.hops);
     if (hidesSigns(smoke)) agent.blindFor += dt;
-    const nearFire = room === lab.scenario.origin && Math.hypot(agent.x - fx, agent.z - fz) < 3.5 && t > 2;
+    const nearFire = room === lab.scenario.origin && Math.hypot(agent.x - fx, agent.z - fz) < FIRE_REACH && t > 2;
     // a shut door and fresh air at the window cut the dose far more than crawling alone
-    const breathe = smoke > 0.1 ? smoke * 1.5 * (agent.sheltering ? 0.2 : agent.pace === "crawl" ? 0.35 : 1) : 0;
-    const burn = nearFire ? 7 : 0;
+    const breathe = smokeDose(smoke, agent.pace === "crawl", agent.sheltering);
+    const burn = nearFire ? FIRE_BURN : 0;
     agent.exposure += breathe * dt;
     agent.health = Math.max(0, agent.health - (breathe + burn) * dt);
     if (agent.health <= 0) {
@@ -985,12 +1066,22 @@ export function step(dt: number) {
     if (lab.config?.warden === "ai" && !lab.wardenBusy && t >= lab.nextWardenAt) void wardenTurn();
   }
 
+  const crowdMoving = lab.crowd.length
+    ? stepCrowd(
+        lab.crowd,
+        { t, dt, grid: lab.walk ?? lab.grid, leaders: lab.agents, origin: lab.scenario.origin, hops: lab.hops, hidesSigns },
+        () => {},
+        () => {},
+      )
+    : 0;
+  if (lab.crowd.length) separate(lab.crowd, lab.agents);
+
   if (t >= lab.rec.nextAt) {
     recordFrame();
     lab.rec.nextAt = t + FRAME_EVERY;
   }
 
-  const moving = lab.agents.filter((agent) => agent.status === "inside" && !agent.sheltering).length;
+  const moving = lab.agents.filter((agent) => agent.status === "inside" && !agent.sheltering).length + crowdMoving;
   if (moving === 0 || t >= MAX_RUN_SECONDS) {
     recordFrame();
     lab.finished = true;
@@ -1002,7 +1093,7 @@ export function step(dt: number) {
         ? `Everyone is accounted for at ${Math.round(t)}s${sheltered ? `: ${sheltered} sheltering inside for firefighters` : ""}.`
         : `Time limit reached: ${moving} still trying to get out${sheltered ? `, ${sheltered} sheltering` : ""}.`,
       undefined,
-      { type: "end", survived: lab.agents.filter((a) => a.status === "safe" || (a.status === "inside" && a.sheltering)).length, people: lab.agents.length },
+      { type: "end", survived: lab.agents.filter((a) => a.status === "safe" || (a.status === "inside" && a.sheltering)).length + crowdCounts(lab.crowd).safe + crowdCounts(lab.crowd).sheltering, people: lab.agents.length + lab.crowd.length },
     );
     publish(true);
   } else publish(false);
@@ -1034,20 +1125,21 @@ export interface RunResult {
 
 export function summarise(): RunResult | null {
   if (!lab.config || !lab.scenario) return null;
-  const safe = lab.agents.filter((a) => a.status === "safe");
+  const safe = [...lab.agents.filter((a) => a.status === "safe"), ...lab.crowd.filter((f) => f.status === "safe")];
   const exits: Record<string, number> = {};
-  for (const agent of safe) exits[agent.exit ?? "?"] = (exits[agent.exit ?? "?"] ?? 0) + 1;
+  for (const person of safe) exits[person.exit ?? "?"] = (exits[person.exit ?? "?"] ?? 0) + 1;
+  const crowd = crowdCounts(lab.crowd);
   return {
     id: `${lab.runId}-${Date.now()}`,
     at: Date.now(),
     scenario: lab.scenario.label,
     warden: lab.config.warden,
-    agents: lab.agents.length,
+    agents: lab.agents.length + crowd.total,
     seed: lab.config.seed,
     safe: safe.length,
-    sheltered: lab.agents.filter((a) => a.status === "inside" && a.sheltering).length,
-    down: lab.agents.filter((a) => a.status === "down").length,
-    inside: lab.agents.filter((a) => a.status === "inside" && !a.sheltering).length,
+    sheltered: lab.agents.filter((a) => a.status === "inside" && a.sheltering).length + crowd.sheltering,
+    down: lab.agents.filter((a) => a.status === "down").length + crowd.down,
+    inside: lab.agents.filter((a) => a.status === "inside" && !a.sheltering).length + crowd.inside,
     seconds: Math.round(lab.t),
     meanEscape: safe.length ? Math.round(safe.reduce((sum, a) => sum + (a.endedAt ?? 0), 0) / safe.length) : null,
     meanExposure: Math.round((lab.agents.reduce((sum, a) => sum + a.exposure, 0) / Math.max(1, lab.agents.length)) * 10) / 10,
@@ -1185,7 +1277,26 @@ export function auditDrill(replayId: string | null): AuditDrill | null {
       noticedAt: a.noticedAt === null ? null : Math.round(a.noticedAt),
       blindFor: Math.round(a.blindFor),
       missedOrders: a.missedOrders,
-    })),
+    })).concat(
+      lab.crowd.map((f) => ({
+        id: f.id,
+        name: "",
+        kind: "student",
+        label: "everyone else",
+        icon: "🧑",
+        survived: f.status === "safe" || (f.status === "inside" && f.sheltering),
+        status: f.status,
+        endedAt: f.endedAt === null ? null : Math.round(f.endedAt),
+        where: f.status === "safe" ? `${f.exit} exit` : placeName(f.room),
+        trouble: [],
+        exit: f.exit,
+        nearestExit: f.nearestExit,
+        firstMoveAt: f.firstMoveAt === null ? null : Math.round(f.firstMoveAt),
+        noticedAt: 0,
+        blindFor: Math.round(f.blindFor),
+        missedOrders: 0,
+      })),
+    ),
     replayId,
     cost: result.cost,
   };
@@ -1262,6 +1373,7 @@ export function takeReplay(drill: number | null): Replay | null {
     config: lab.config,
     people: lab.agents.map((a) => ({ id: a.id, name: a.name, color: a.color, persona: a.persona })),
     frames: lab.rec.frames,
+    crowd: lab.crowd.length ? lab.rec.crowd : undefined,
     thoughts: lab.rec.thoughts,
     targets: lab.rec.targets,
     log: lab.log.map(({ t, kind, text, agent, event }) => ({ t, kind, text, agent, event })),
@@ -1271,6 +1383,8 @@ export function takeReplay(drill: number | null): Replay | null {
 
 /** Load a recorded drill into the lab and start playing it. */
 export function playReplay(replay: Replay) {
+  const wanted = replay.config.building ? planFor(replay.config.building) : DEMO_PLAN;
+  if (plan.id !== wanted.id) setPlan(wanted);
   const scenario = SCENARIOS.find((item) => item.id === replay.config.scenarioId) ?? SCENARIOS[0];
   lab.runId++;
   lab.config = replay.config;
@@ -1326,6 +1440,9 @@ export function playReplay(replay: Replay) {
     exit: null,
     history: [],
   }));
+  // the crowd is rebuilt from its recording: only where each person was, and whether they made it
+  const crowdSize = replay.crowd?.[0] ? (replay.crowd[0].length - 1) / 3 : 0;
+  lab.crowd = spawnCrowd(new Map(crowdSize ? [[INDOOR[0], crowdSize]] : []), Math.random, null, new Map(), 1000);
   applyFrame(0);
   publish(true);
 }
@@ -1358,6 +1475,7 @@ function applyFrame(t: number) {
     const status = ORDER[a[o + 9]];
     agent.order = status ? { t: 0, message: "", target: { kind: "recorded", label: replay.targets[a[o + 10]] ?? "" }, status } : null;
   });
+  if (replay.crowd?.length) applyCrowdFrame(lab.crowd, replay.crowd, t);
 }
 
 function playbackStep(dt: number) {
@@ -1385,6 +1503,8 @@ export interface Snapshot {
   log: LogEntry[];
   usage: Usage;
   wardenBusy: boolean;
+  /** the unnumbered people, as totals */
+  crowd: { total: number; safe: number; down: number; sheltering: number; inside: number };
 }
 
 export const useLab = create<{ snap: Snapshot | null }>(() => ({ snap: null }));
@@ -1422,6 +1542,7 @@ export function publish(force: boolean) {
       log: [...lab.log],
       usage: { ...lab.usage, byTask: { ...lab.usage.byTask } },
       wardenBusy: lab.wardenBusy,
+      crowd: crowdCounts(lab.crowd),
     },
   });
 }

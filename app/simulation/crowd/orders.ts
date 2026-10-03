@@ -1,5 +1,4 @@
-import type { RoomId } from "../level";
-import { INDOOR, LINKS, linksOf, otherSide, placeName, type Link } from "./world";
+import { INDOOR, LINKS, linksOf, otherSide, placeName, plan, type Link, type RoomId } from "./world";
 
 /**
  * The warden's orders to individual people, and whether each person is following theirs.
@@ -27,10 +26,10 @@ export interface Order {
   status: OrderStatus;
 }
 
-const EXIT_NAMES: Record<string, string> = { main: "Main Exit", west: "West Fire Exit", east: "East Fire Exit", north: "North Fire Exit" };
+const EXIT_NAMES: Record<string, string> = { main: "Main Exit", west: "West Fire Exit", east: "East Fire Exit", north: "North Fire Exit", south: "South Fire Exit" };
 
 // most specific first: "north corridor" before "corridor", "sports hall" before "hall", "computer lab" before "lab"
-const ROOM_WORDS: [RegExp, RoomId][] = [
+const DEMO_WORDS: [RegExp, RoomId][] = [
   [/north corridor|north wing/, "ncorr"],
   [/lecture/, "lecture"],
   [/computer/, "complab"],
@@ -47,26 +46,40 @@ const ROOM_WORDS: [RegExp, RoomId][] = [
   [/east passage|academic block passage/, "ecorr"],
 ];
 
+const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** How each room can be named: the demo's hand-tuned words, or for a designed floor its room names, longest first. */
+let words: { planId: string; list: [RegExp, RoomId][] } | null = null;
+function roomWords(): [RegExp, RoomId][] {
+  if (words?.planId === plan.id) return words.list;
+  const list: [RegExp, RoomId][] = plan.demo
+    ? DEMO_WORDS
+    : [...plan.rooms]
+        .sort((a, b) => placeName(b.id).length - placeName(a.id).length)
+        .map((room) => [new RegExp(`\\b${escape(placeName(room.id).toLowerCase())}\\b`), room.id]);
+  words = { planId: plan.id, list };
+  return list;
+}
+
 /** Read a destination out of the warden's words, e.g. "WEST FIRE EXIT" or "the Library". */
 export function parseTarget(text: string): Target | null {
-  const s = text.toLowerCase();
+  // what to stay away from is not where to go: "avoid Classroom 3" must never send anyone there
+  const s = text.toLowerCase().replace(/\b(avoid|away from|stay out of|keep out of|do not (use|go|enter)|don't (use|go|enter)|never use|not through|instead of)\b[^.,;!?]*/g, " ");
   if (/shelter|stay put|stay where you are|shut the door/.test(s)) return { kind: "shelter", label: "Shelter in place" };
   // "leave by the main entrance" means the main exit, not the entrance hall
-  const leaving = /\b(get out|leave|exit|escape|evacuate|outside)\b/.test(s);
-  if (leaving && /main entrance|front door/.test(s)) return { kind: "exit", link: LINKS.find((l) => l.exit === "main")!, label: EXIT_NAMES.main };
-  for (const exit of ["west", "east", "north", "main"] as const) {
-    if (new RegExp(`${exit}\\b[^.]*exit|${exit} fire exit`).test(s)) {
-      const link = LINKS.find((l) => l.exit === exit)!;
-      return { kind: "exit", link, label: EXIT_NAMES[exit] };
-    }
+  const leaving = /\b(get out|out|leave|exit|escape|evacuate|outside)\b/.test(s);
+  const main = LINKS.find((l) => l.exit === "main");
+  if (leaving && main && /main entrance|front door/.test(s)) return { kind: "exit", link: main, label: EXIT_NAMES.main };
+  for (const exit of ["west", "east", "north", "south", "main"] as const) {
+    const link = LINKS.find((l) => l.exit === exit);
+    if (link && new RegExp(`${exit}\\b[^.]*exit|${exit} fire exit`).test(s)) return { kind: "exit", link, label: EXIT_NAMES[exit] };
   }
-  for (const [pattern, room] of ROOM_WORDS) if (pattern.test(s)) return { kind: "room", room, label: placeName(room) };
+  if (/nearest (safe )?(fire )?exit|closest (safe )?exit/.test(s)) return { kind: "out", label: "Nearest exit" };
+  for (const [pattern, room] of roomWords()) if (pattern.test(s)) return { kind: "room", room, label: placeName(room) };
   // a bare direction ("#10 go west") means the way out on that side of the building
   const way = s.match(/\b(west|east|north|south)\b/)?.[1] as keyof typeof EXIT_BY_SIDE | undefined;
-  if (way) {
-    const exit = EXIT_BY_SIDE[way];
-    return { kind: "exit", link: LINKS.find((l) => l.exit === exit)!, label: EXIT_NAMES[exit] };
-  }
+  const sideExit = way && (LINKS.find((l) => l.exit === way) ?? LINKS.find((l) => l.exit === EXIT_BY_SIDE[way]));
+  if (sideExit) return { kind: "exit", link: sideExit, label: EXIT_NAMES[sideExit.exit!] };
   if (leaving || /exit sign|follow the (green )?signs|nearest exit/.test(s)) return { kind: "out", label: "Nearest exit" };
   return null;
 }
@@ -103,6 +116,9 @@ function distances(target: Target, avoid?: RoomId) {
   let anyway: Map<RoomId, number> | null = null;
   return (room: RoomId) => safe.get(room) ?? (anyway ??= spread(undefined)).get(room) ?? Infinity;
 }
+
+/** Doorways from a room to the nearest way out, not through the fire when there is another way. */
+export const exitDistance = (room: RoomId, avoid?: RoomId) => distances({ kind: "out", label: "Nearest exit" }, avoid)(room);
 
 /** The doorway to take from `from` towards the target: the way out if it is right here, else the neighbour nearest the goal. */
 export function nextHop(from: RoomId, target: Target, avoid?: RoomId): Link | null {

@@ -25,7 +25,7 @@ import { Label } from "./Markers";
 type Box = { pos: [number, number, number]; size: [number, number, number] };
 
 /** Cut a wall run into segments around its openings, with lintels on top. */
-function wallBoxes(def: WallDef): Box[] {
+export function wallBoxes(def: WallDef): Box[] {
   const h = def.height ?? ROOM_H;
   const out: Box[] = [];
   const push = (u1: number, u2: number, y1: number, y2: number) => {

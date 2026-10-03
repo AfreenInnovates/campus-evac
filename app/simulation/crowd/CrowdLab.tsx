@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { ScorecardView } from "./Scorecard";
 import { auditDrill, playReplay, takeReplay, debrief, findings, humanBroadcast, lab, MAX_RUN_SECONDS, RUN_BUDGET_USD, setRunning, setupRun, summarise, useLab, type LabConfig, type RunResult, type WardenMode } from "./engine";
@@ -17,7 +17,9 @@ import TrainingPanel, { type QueueItem } from "./Training";
 import { Caption, PABanner, Scoreboard, useStory, VoiceToggle } from "./Story";
 import { pauseVoice, resumeVoice, setVoiceRate, speak, stopSpeaking } from "./voice";
 import { OrdersPanel, ThoughtsFeed } from "./Coordination";
-import { SCENARIOS, placeName } from "./world";
+import { DEMO_PLAN, placeName, SCENARIOS, usePlan } from "./world";
+import FloorDesigner, { chooseFloor, savedFloor, useSavedFloor } from "./FloorDesigner";
+import { peopleIn, planFor, type BuildingSpec } from "./floorplan";
 
 const CrowdScene = dynamic(() => import("./CrowdScene"), {
   ssr: false,
@@ -71,8 +73,9 @@ export const freshSeed = () => 1 + Math.floor(Math.random() * 999_999);
  * One choice and one button. Where the fire starts is the only thing most people want to
  * pick; the knobs for experiments fold away under "More options".
  */
-function Setup({ onStart, onAudit, compact = false }: { onStart: (config: LabConfig) => void; onAudit: () => void; compact?: boolean }) {
+function Setup({ onStart, onAudit, onDesign, compact = false }: { onStart: (config: LabConfig) => void; onAudit: () => void; onDesign: () => void; compact?: boolean }) {
   const navReady = useSpectator((s) => s.navReady);
+  const building = usePlan((s) => s.plan)!;
   const [config, setConfig] = useState<LabConfig>(DEFAULT_CONFIG);
   const [more, setMore] = useState(false);
   // a seed typed in by hand is kept; otherwise every drill is a new crowd
@@ -80,22 +83,45 @@ function Setup({ onStart, onAudit, compact = false }: { onStart: (config: LabCon
   const go = (next: LabConfig) => {
     // on a phone or tablet, go full screen and sideways: only allowed from a tap like this one
     void enterLandscape();
-    onStart({ ...next, seed: pinnedSeed ? next.seed : freshSeed() });
+    onStart({ ...next, scenarioId: scenario.id, building: building.spec, seed: pinnedSeed ? next.seed : freshSeed() });
   };
-  const scenario = SCENARIOS.find((s) => s.id === config.scenarioId)!;
+  const scenario = building.scenarios.find((s) => s.id === config.scenarioId) ?? building.scenarios[0];
   const playbook = usePlaybook((s) => s.playbook);
   const set = (patch: Partial<LabConfig>) => setConfig((c) => ({ ...c, ...patch }));
   const label = "text-[10px] font-bold uppercase tracking-[0.14em] text-paper/60";
 
   return (
     <Panel title="Start a drill">
+      <label className={label}>Which building?</label>
+      <div className="mb-3 mt-1.5 grid grid-cols-3 gap-1">
+        <button
+          onClick={() => chooseFloor(null)}
+          className={`border-2 px-1 py-1.5 text-[11px] font-bold leading-tight ${building.demo ? "border-sun bg-sun/15 text-paper" : "border-paper/15 text-paper/70 hover:border-paper/40"}`}
+        >
+          Demo campus
+        </button>
+        <button
+          onClick={() => {
+            const saved = savedFloor() ?? (building.spec ? building.spec : null);
+            if (saved) chooseFloor(saved);
+            else onDesign();
+          }}
+          className={`border-2 px-1 py-1.5 text-[11px] font-bold leading-tight ${!building.demo ? "border-sun bg-sun/15 text-paper" : "border-paper/15 text-paper/70 hover:border-paper/40"}`}
+          title={!building.demo ? building.label : "Your own floor"}
+        >
+          Your floor
+        </button>
+        <button onClick={onDesign} className="border-2 border-dashed border-paper/30 px-1 py-1.5 text-[11px] font-bold text-paper/70 hover:border-sun hover:text-paper">
+          Design
+        </button>
+      </div>
       <label className={label}>Where does the fire start?</label>
       <div className="mt-1.5 grid grid-cols-2 gap-1">
-        {SCENARIOS.map((s) => (
+        {building.scenarios.map((s) => (
           <button
             key={s.id}
             onClick={() => set({ scenarioId: s.id })}
-            className={`border-2 px-2 py-1.5 text-left text-[11px] font-bold leading-tight ${config.scenarioId === s.id ? "border-sun bg-sun/15 text-paper" : "border-paper/15 text-paper/70 hover:border-paper/40"}`}
+            className={`border-2 px-2 py-1.5 text-left text-[11px] font-bold leading-tight ${scenario.id === s.id ? "border-sun bg-sun/15 text-paper" : "border-paper/15 text-paper/70 hover:border-paper/40"}`}
           >
             {s.label.replace(/^[A-Z][a-z]+ fire in (the )?/, "").replace(/^Fire in (the )?/, "") || s.label}
           </button>
@@ -170,65 +196,68 @@ function Setup({ onStart, onAudit, compact = false }: { onStart: (config: LabCon
   );
 }
 
-/* ------------------------------------------------------------------ first visit */
+/* ------------------------------------------------------------------ start */
 
-const INTRO_KEY = "campusevac:crowd-intro";
-const INTRO = [
-  { title: "The people", body: "Each person is an AI. They only see their own room, the signs and the smoke, and you can read what they are thinking.", accent: "#38bdf8" },
-  { title: "The warden", body: "An AI watches the security camera and speaks over the speakers to guide them. You can hear it.", accent: "#ffc44d" },
-  { title: "The lesson", body: "After each drill, another AI reviews what went wrong and teaches the warden new rules for next time.", accent: "#2fd18f" },
+const HOW = [
+  { title: "The people are AI", body: "Each one only sees their own room, the signs and the smoke. You can read what they think.", accent: "#38bdf8" },
+  { title: "So is the warden", body: "It watches the security camera and speaks over the PA to guide them. You can hear it.", accent: "#ffc44d" },
+  { title: "And it learns", body: "After each drill another AI reviews what went wrong, and the warden gets new rules.", accent: "#2fd18f" },
 ];
 
-/** Three cards and one button, once per browser. The building stays visible behind them. */
-function Intro({ onWatch, onSetup }: { onWatch: () => void; onSetup: () => void }) {
-  const navReady = useSpectator((s) => s.navReady);
-  const close = (then: () => void) => () => {
-    try {
-      localStorage.setItem(INTRO_KEY, "seen");
-    } catch {
-      /* show again next time */
-    }
-    then();
-  };
+/**
+ * Where everything starts: watch a drill straight away, or set up your own floor first. Shown
+ * whenever no drill is running, so the choice is never hidden behind a menu.
+ */
+function StartChooser({ onWatch, onDesign, onContinue, onPickFire }: { onWatch: () => void; onDesign: () => void; onContinue: (spec: BuildingSpec) => void; onPickFire: () => void }) {
+  const spec = useSavedFloor();
+  const saved = useMemo(() => {
+    if (!spec) return null;
+    const plan = planFor(spec);
+    return `${plan.rooms.length - 2} rooms · ${peopleIn(plan)} people`;
+  }, [spec]);
+  const card = "hud-panel flex flex-col items-start p-4 text-left transition hover:-translate-y-0.5 hover:border-sun";
   return (
-    <div className="pointer-events-auto absolute inset-0 z-30 grid place-items-center overflow-y-auto bg-night/55 p-3">
+    <div className="pointer-events-auto absolute inset-0 z-30 grid place-items-center overflow-y-auto bg-night/60 p-3">
       <section className="w-full max-w-3xl">
         <h1 className="text-center text-2xl font-black uppercase tracking-[-0.03em] sm:text-4xl">Can an AI get a crowd out of a fire?</h1>
-        <p className="mx-auto mt-2 max-w-2xl text-center text-[13px] leading-snug text-paper/80 sm:text-[15px]">
-          In a real fire nobody has a map. People follow the signs, the smoke, and whoever is speaking on the speakers. Fire drills
-          never train that voice. Here you watch it happen, and see whether the voice can learn.
+        <p className="mx-auto mt-2 max-w-2xl text-center text-[13px] leading-snug text-paper/80">
+          Find where an evacuation plan fails, and who it leaves behind, before a real fire does.
         </p>
-        <div className="mt-4 grid gap-2 sm:grid-cols-3">
-          {INTRO.map((card, i) => (
-            <div key={card.title} className="hud-panel p-3" style={{ borderLeftColor: card.accent }}>
-              <div className="font-mono text-[10px] font-black" style={{ color: card.accent }}>
-                0{i + 1}
-              </div>
-              <div className="mt-1 text-[14px] font-black leading-tight">{card.title}</div>
-              <p className="mt-1 text-[12px] leading-snug text-paper/70">{card.body}</p>
-            </div>
+        <div className={`mt-4 grid gap-2 ${spec ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
+          <button onClick={onWatch} className={card} style={{ borderLeftColor: "#ff6a3d" }}>
+            <span className="text-[10px] font-black uppercase tracking-[0.16em] text-coral">▶ Just watch</span>
+            <span className="mt-1 text-[17px] font-black leading-tight">Watch it happen</span>
+            <span className="mt-1 text-[12px] leading-snug text-paper/70">A fire on the demo campus. Twelve AI people, an AI warden. Sit back.</span>
+          </button>
+          <button onClick={onDesign} className={card} style={{ borderLeftColor: "#ffc44d" }}>
+            <span className="text-[10px] font-black uppercase tracking-[0.16em] text-sun">✎ Your building</span>
+            <span className="mt-1 text-[17px] font-black leading-tight">Set up your own floor</span>
+            <span className="mt-1 text-[12px] leading-snug text-paper/70">Enter your rooms and how many people are in each, then test it in a fire.</span>
+          </button>
+          {spec && (
+            <button onClick={() => onContinue(spec)} className={card} style={{ borderLeftColor: "#2fd18f" }}>
+              <span className="text-[10px] font-black uppercase tracking-[0.16em] text-mint">↺ Saved</span>
+              <span className="mt-1 text-[17px] font-black leading-tight">Continue with your floor</span>
+              <span className="mt-1 text-[12px] leading-snug text-paper/70">{saved}</span>
+            </button>
+          )}
+        </div>
+        <div className="mt-3 grid gap-1.5 sm:grid-cols-3">
+          {HOW.map((item) => (
+            <p key={item.title} className="border-l-2 pl-2 text-[11px] leading-snug text-paper/60" style={{ borderLeftColor: item.accent }}>
+              <b className="text-paper/85">{item.title}.</b> {item.body}
+            </p>
           ))}
         </div>
-        <div className="mt-4 flex flex-wrap items-center justify-center gap-3">
-          <button onClick={close(onWatch)} disabled={!navReady} className="brutal-button px-6 py-3 disabled:opacity-60">
-            {navReady ? "Watch a drill" : "Preparing the building…"}
-          </button>
-          <button onClick={close(onSetup)} className="text-[11px] font-black uppercase tracking-[0.16em] text-paper/60 underline underline-offset-4 hover:text-paper">
-            Choose the fire myself
+        <div className="mt-3 text-center">
+          <button onClick={onPickFire} className="text-[11px] font-black uppercase tracking-[0.16em] text-paper/60 underline underline-offset-4 hover:text-paper">
+            Or pick the fire myself
           </button>
         </div>
       </section>
     </div>
   );
 }
-
-const readIntroSeen = () => {
-  try {
-    return localStorage.getItem(INTRO_KEY) === "seen";
-  } catch {
-    return true;
-  }
-};
 
 /* ------------------------------------------------------------------ people */
 
@@ -395,9 +424,9 @@ function Warden({ mode }: { mode: WardenMode }) {
 function Stats({ compact = false }: { compact?: boolean }) {
   const snap = useLab((s) => s.snap);
   if (!snap) return null;
-  const safe = snap.agents.filter((a) => a.status === "safe").length;
-  const down = snap.agents.filter((a) => a.status === "down").length;
-  const inside = snap.agents.length - safe - down;
+  const safe = snap.agents.filter((a) => a.status === "safe").length + snap.crowd.safe;
+  const down = snap.agents.filter((a) => a.status === "down").length + snap.crowd.down;
+  const inside = snap.agents.length + snap.crowd.total - safe - down;
   const avg = snap.usage.calls ? Math.round(snap.usage.ms / Math.max(1, snap.usage.calls - snap.usage.failures)) : 0;
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 font-mono text-[11px]">
@@ -656,7 +685,6 @@ function Ticker({ lines }: { lines: number }) {
   );
 }
 
-const noSubscribe = () => () => {};
 
 const barButton = "whitespace-nowrap border-2 border-paper/30 bg-night/85 px-2.5 py-1.5 text-[10px] font-black uppercase tracking-[0.12em] hover:border-paper/70";
 const pauseRun = () => setRunning(false);
@@ -671,11 +699,12 @@ export default function CrowdLab() {
   const [drawer, setDrawer] = useState<"people" | "warden" | "log" | null>(null);
   const [showTraining, setShowTraining] = useState(false);
   const [showAudit, setShowAudit] = useState(false);
+  const [showDesigner, setShowDesigner] = useState(false);
   // the simple view is the default; the panels with every detail are one click away
   const [details, setDetails] = useState(false);
   const story = useStory();
-  const introSeen = useSyncExternalStore(noSubscribe, readIntroSeen, () => true);
-  const [introClosed, setIntroClosed] = useState(false);
+  // the start screen, every time no drill is running
+  const [choosing, setChoosing] = useState(true);
   // a queue of drills run back to back: training (learning on) or the before/after evaluation
   const [queue, setQueue] = useState<{ items: QueueItem[]; index: number; label: string } | null>(null);
   const handled = useRef(-1);
@@ -693,6 +722,7 @@ export default function CrowdLab() {
   // what the last training drill taught the warden, shown while the next one starts
   const [lesson, setLesson] = useState<{ drill: number; survival: number; added: string[]; removed: string[] } | null>(null);
   const started = hasRun && !!config;
+
 
   useEffect(() => {
     void hydratePlaybook();
@@ -717,6 +747,18 @@ export default function CrowdLab() {
     setupRun(next);
     setRunning(true);
   };
+  /** "Watch it happen": a drill on the demo campus, as soon as it is ready to run. */
+  const watchDemo = () => {
+    const go = () => start({ ...DEFAULT_CONFIG, scenarioId: DEMO_PLAN.scenarios[0].id, seed: freshSeed() });
+    if (usePlan.getState().plan.demo && useSpectator.getState().navReady) return go();
+    chooseFloor(null);
+    // the campus is being built: start the moment its walking map is read
+    const stop = useSpectator.subscribe((state) => {
+      if (!state.navReady || !usePlan.getState().plan.demo) return;
+      stop();
+      go();
+    });
+  };
   const newSetup = () => {
     stopSpeaking();
     setVoiceRate(1);
@@ -725,6 +767,7 @@ export default function CrowdLab() {
     setRunning(false);
     setConfig(null);
     setQueue(null);
+    setChoosing(true);
     useLab.setState({ snap: null });
   };
 
@@ -901,16 +944,16 @@ export default function CrowdLab() {
       </header>
 
       {!started &&
-        (introSeen || introClosed) &&
+        !choosing &&
         (compact ? (
           <div className="pointer-events-auto absolute inset-0 z-20 grid place-items-center overflow-y-auto bg-night/40 p-3 pt-14">
             <div className="w-full max-w-2xl">
-              <Setup onStart={start} onAudit={() => setShowAudit(true)} compact />
+              <Setup onStart={start} onAudit={() => setShowAudit(true)} onDesign={() => setShowDesigner(true)} compact />
             </div>
           </div>
         ) : (
           <aside className="pointer-events-none absolute bottom-4 left-4 top-[4.5rem] z-10 flex w-[19rem] flex-col">
-            <Setup onStart={start} onAudit={() => setShowAudit(true)} />
+            <Setup onStart={start} onAudit={() => setShowAudit(true)} onDesign={() => setShowDesigner(true)} />
           </aside>
         ))}
 
@@ -1024,14 +1067,25 @@ export default function CrowdLab() {
         </div>
       )}
       {config && finished && !queue && !watching && lab.runId !== quietRun && <Results key={lab.runId} onAgain={() => start({ ...config })} onSetup={newSetup} onCompare={() => start({ ...config, warden: "ai" })} onWatch={() => lastReplay.current && playRecorded(lastReplay.current, "Your last drill")} />}
-      {!introSeen && !introClosed && !started && (
-        <Intro
+      {choosing && !started && (
+        <StartChooser
           onWatch={() => {
-            setIntroClosed(true);
+            setChoosing(false);
             void enterLandscape();
-            start({ ...DEFAULT_CONFIG, seed: freshSeed() });
+            watchDemo();
           }}
-          onSetup={() => setIntroClosed(true)}
+          onDesign={() => {
+            setChoosing(false);
+            setShowDesigner(true);
+          }}
+          onContinue={(spec) => {
+            chooseFloor(spec);
+            setChoosing(false);
+          }}
+          onPickFire={() => {
+            chooseFloor(null);
+            setChoosing(false);
+          }}
         />
       )}
       {showTraining && (
@@ -1048,6 +1102,15 @@ export default function CrowdLab() {
         />
       )}
       {showExperiments && <Experiments onClose={() => setShowExperiments(false)} />}
+      {showDesigner && (
+        <FloorDesigner
+          onClose={() => setShowDesigner(false)}
+          onUse={(spec) => {
+            chooseFloor(spec);
+            setShowDesigner(false);
+          }}
+        />
+      )}
       {showAudit && (
         <AuditPanel
           busy={!!queue}

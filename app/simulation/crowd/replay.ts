@@ -34,6 +34,8 @@ export interface Replay {
   people: ReplayPerson[];
   /** each frame: [t, ...FIELDS values per person] */
   frames: number[][];
+  /** on a designed floor, everyone else: [t, x, z, status per person] */
+  crowd?: number[][];
   /** strings referenced by index from the frames */
   thoughts: string[];
   targets: string[];

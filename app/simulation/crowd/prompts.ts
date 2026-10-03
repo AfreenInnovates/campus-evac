@@ -17,6 +17,8 @@ interface ModelSpec {
   price: { input: number; output: number };
   /** extra request fields, e.g. switching a reasoning model's thinking off */
   extra?: Record<string, unknown>;
+  /** if it thinks through its whole budget without answering, ask again with thinking off and this many tokens */
+  retryWithoutThinking?: number;
 }
 
 const ULTRA: ModelSpec = {
@@ -27,6 +29,7 @@ const ULTRA: ModelSpec = {
   json: true,
   timeoutMs: 120_000,
   price: { input: 1, output: 3 },
+  retryWithoutThinking: 2000,
 };
 
 export const MODELS: Record<CrowdTask, ModelSpec> = {
@@ -58,8 +61,9 @@ export const MODELS: Record<CrowdTask, ModelSpec> = {
   "warden-think": {
     model: "nvidia/nemotron-3-super-120b-a12b",
     label: "Nemotron 3 Super",
-    // it reasons before it speaks (~1.5k thinking tokens), so leave room for both
-    maxTokens: 2600,
+    // it reasons before it speaks; on a big floor that can run long, so leave room, and fall back to a straight answer
+    maxTokens: 4000,
+    retryWithoutThinking: 900,
     temperature: 0.3,
     json: true,
     timeoutMs: 45_000,
@@ -92,12 +96,13 @@ export const SYSTEM: Record<CrowdTask, string> = {
   ].join("\n"),
 
   "warden-think": [
-    "You are the fire warden coordinating an evacuation over the public address system.",
+    "You are the fire warden coordinating an evacuation over the public address system. Every second counts: think briefly, then answer.",
     "You cannot see the building directly. Each turn you get: the building plan, a CCTV analyst's report of the newest camera frame (it can miss things), and the announcements you already made.",
     "The evacuees are ordinary people. They do not have a map: they only know the room they are standing in and the signs over its doorways. Everyone hears every announcement.",
     "Give short, concrete directions a person can act on from where they stand. Name rooms and signs they can see, e.g. \"People in the Library: leave by the green FIRE EXIT on the west wall.\" Never use coordinates.",
     "Direct people by number, using the roll call: only people still inside. Each directive has exactly one destination: a room name from the plan, MAIN EXIT, WEST FIRE EXIT, EAST FIRE EXIT, NORTH FIRE EXIT, or SHELTER. People in thick smoke cannot read the signs, so they depend on you.",
-    "Prioritise: first anyone in or next to the fire room or in heavy smoke, then whoever is farthest from a safe exit. Over your turns, make sure every person still inside gets a personal order. Send each person to the exit that is nearest to them and not through the fire. Only group people who are in the same room; anyone elsewhere gets their own directive, phrased from where they stand.",
+    "Prioritise: first anyone in or next to the fire room or in heavy smoke, then the people with known needs (wheelchair users, deaf and elderly people) - they get a personal order in your very first turn - then anyone the sensors show has stopped moving, then whoever is farthest from a safe exit. Over your turns, make sure every person still inside gets a personal order. Only group people who are in the same room; anyone elsewhere gets their own directive, phrased from where they stand.",
+    "Real fires kill in known ways; counter each one. Speak at once: the delay before people start moving kills, so your first broadcast is short and tells everyone to leave now. People run for the door they came in by, so name the exit nearest to each person, not just the main entrance. Do not send everyone to one exit: spread people across the safe exits. In thick smoke people cannot read signs, so give directions by room names and north/south/east/west.",
     "Some people have known needs listed in the roll call. A wheelchair user can only use step-free exits, so never send them to the WEST FIRE EXIT. A deaf person cannot hear the PA or their name: to reach them, tell a hearing person in the same room, by number, to bring them along. People who freeze in panic usually start moving once you address them calmly by name.",
     "Keep people away from the fire room and heavy smoke. Name the exit to use and the one to avoid. If people are cut off with every route through fire or heavy smoke, tell them to shelter in place: shut the door, stay low by a window, wait for firefighters.",
     "Never contradict your own announcements or what you told someone by name, unless the situation changed, and then say so. Do not repeat an announcement that has not changed; leave the broadcast empty if there is nothing new to say.",

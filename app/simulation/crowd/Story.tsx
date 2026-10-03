@@ -138,10 +138,11 @@ export function Scoreboard() {
   const t = useLab((s) => s.snap?.t ?? 0);
   const counts = useLab((s) => {
     const agents = s.snap?.agents ?? [];
-    const safe = agents.filter((a) => a.status === "safe").length;
-    const sheltering = agents.filter((a) => a.status === "inside" && a.sheltering).length;
-    const hurt = agents.filter((a) => a.status === "down").length;
-    return `${safe}|${agents.length - safe - sheltering - hurt}|${sheltering}|${hurt}`;
+    const crowd = s.snap?.crowd ?? { total: 0, safe: 0, down: 0, sheltering: 0, inside: 0 };
+    const safe = agents.filter((a) => a.status === "safe").length + crowd.safe;
+    const sheltering = agents.filter((a) => a.status === "inside" && a.sheltering).length + crowd.sheltering;
+    const hurt = agents.filter((a) => a.status === "down").length + crowd.down;
+    return `${safe}|${agents.length + crowd.total - safe - sheltering - hurt}|${sheltering}|${hurt}`;
   });
   const [safe, inside, sheltering, hurt] = counts.split("|").map(Number);
   const chip = (label: string, value: number, color: string) => (

@@ -11,19 +11,28 @@ import { FIELDS, STATUS } from "./replay";
  * audit map.
  */
 
-export const HEAT = { minX: -24, maxX: 24, minZ: -46, maxZ: 12, cell: 1 };
-const COLS = Math.round((HEAT.maxX - HEAT.minX) / HEAT.cell);
-const ROWS = Math.round((HEAT.maxZ - HEAT.minZ) / HEAT.cell);
+const CELL = 1;
+type Area = { minX: number; maxX: number; minZ: number; maxZ: number };
+
+/** The area a heatmap covers: the building and a little around it. */
+export const heatArea = (b: Area): Area => ({ minX: b.minX - 2, maxX: b.maxX + 2, minZ: b.minZ - 3, maxZ: b.maxZ + 2 });
 /** slower than this between two frames counts as standing still (m/s) */
 const STILL = 0.35;
 
 export interface Heat {
+  area: Area;
+  cols: number;
+  rows: number;
   grid: Float32Array;
   /** where people collapsed */
   falls: [number, number][];
 }
 
-export const emptyHeat = (): Heat => ({ grid: new Float32Array(COLS * ROWS), falls: [] });
+export function emptyHeat(area: Area): Heat {
+  const cols = Math.round((area.maxX - area.minX) / CELL);
+  const rows = Math.round((area.maxZ - area.minZ) / CELL);
+  return { area, cols, rows, grid: new Float32Array(cols * rows), falls: [] };
+}
 
 /** Add one drill's frames to a heat grid (so several drills can share one). */
 export function addFrames(heat: Heat, frames: number[][], people: number) {
@@ -42,16 +51,34 @@ export function addFrames(heat: Heat, frames: number[][], people: number) {
       // still before their first decision is the model thinking, not the person: unless frozen in panic (2)
       if (b[o + 7] < 0 && b[o + 4] !== 2) continue;
       if (Math.hypot(b[o] - a[o], b[o + 1] - a[o + 1]) / dt > STILL) continue;
-      const c = Math.floor((b[o] - HEAT.minX) / HEAT.cell);
-      const r = Math.floor((b[o + 1] - HEAT.minZ) / HEAT.cell);
-      if (c >= 0 && r >= 0 && c < COLS && r < ROWS) heat.grid[r * COLS + c] += dt;
+      const c = Math.floor((b[o] - heat.area.minX) / CELL);
+      const r = Math.floor((b[o + 1] - heat.area.minZ) / CELL);
+      if (c >= 0 && r >= 0 && c < heat.cols && r < heat.rows) heat.grid[r * heat.cols + c] += dt;
+    }
+  }
+  return heat;
+}
+
+/** Add a crowd track ([t, x, z, status] per person) the same way: standing still inside counts. */
+export function addCrowdFrames(heat: Heat, frames: number[][]) {
+  for (let f = 1; f < frames.length; f++) {
+    const a = frames[f - 1];
+    const b = frames[f];
+    const dt = b[0] - a[0];
+    if (dt <= 0) continue;
+    for (let o = 1; o < b.length; o += 3) {
+      if (b[o + 2] === 2 && a[o + 2] !== 2) heat.falls.push([b[o], b[o + 1]]);
+      if (b[o + 2] !== 0 || Math.hypot(b[o] - a[o], b[o + 1] - a[o + 1]) / dt > STILL) continue;
+      const c = Math.floor((b[o] - heat.area.minX) / CELL);
+      const r = Math.floor((b[o + 1] - heat.area.minZ) / CELL);
+      if (c >= 0 && r >= 0 && c < heat.cols && r < heat.rows) heat.grid[r * heat.cols + c] += dt;
     }
   }
   return heat;
 }
 
 /** Soften single cells into areas: two passes of a 3x3 box blur. */
-function blur(grid: Float32Array) {
+function blur(grid: Float32Array, COLS: number, ROWS: number) {
   let src = grid;
   for (let pass = 0; pass < 2; pass++) {
     const out = new Float32Array(src.length);
@@ -76,11 +103,12 @@ function blur(grid: Float32Array) {
 
 /** Transparent where nobody waited, through amber to red where people were stuck longest. */
 export function paintHeat(heat: Heat, scale = 8): HTMLCanvasElement {
+  const { cols: COLS, rows: ROWS, area } = heat;
   const canvas = document.createElement("canvas");
   canvas.width = COLS * scale;
   canvas.height = ROWS * scale;
   const ctx = canvas.getContext("2d")!;
-  const smooth = blur(heat.grid);
+  const smooth = blur(heat.grid, COLS, ROWS);
   let max = 0;
   for (const v of smooth) max = Math.max(max, v);
   if (max > 0) {
@@ -107,8 +135,8 @@ export function paintHeat(heat: Heat, scale = 8): HTMLCanvasElement {
   ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = Math.max(2, scale / 3);
   for (const [x, z] of heat.falls) {
-    const px = ((x - HEAT.minX) / HEAT.cell) * scale;
-    const pz = ((z - HEAT.minZ) / HEAT.cell) * scale;
+    const px = ((x - area.minX) / CELL) * scale;
+    const pz = ((z - area.minZ) / CELL) * scale;
     const s = scale * 0.7;
     ctx.beginPath();
     ctx.moveTo(px - s, pz - s);

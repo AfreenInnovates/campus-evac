@@ -1,13 +1,20 @@
-import { EAST_EXIT_Z, NCORR_Z, NORTH_EXIT_X, NORTH_Z, roomAt, roomById, WEST_EXIT_Z, type RoomId } from "../level";
+import { create } from "zustand";
+import { EAST_EXIT_Z, NCORR_Z, NORTH_EXIT_X, NORTH_Z, ROOM_H, ROOMS, WEST_EXIT_Z, type Bounds, type WallDef } from "../level";
 
 /**
- * The building as the crowd experiences it: rooms joined by doorways, three ways out, and a
- * fire that starts in one room and fills the rest by how many doorways away they are.
+ * The building as the crowd experiences it: rooms joined by doorways, ways out, and a fire
+ * that starts in one room and fills the rest by how many doorways away they are.
+ *
+ * Which building that is lives in one place, the current `Plan`: the hand-built demo campus,
+ * or a floor someone designed. Everything below reads the current plan, so the people, the
+ * warden, the orders and the audit work the same in either.
  *
  * Positions are [x, z] on the floor plane.
  */
 
 export type P2 = [number, number];
+/** A room in the current plan, or "outside". */
+export type RoomId = string;
 
 export interface Link {
   id: string;
@@ -20,12 +27,12 @@ export interface Link {
   pb: P2;
   /** what the signage over this doorway says, as a person would read it */
   sign: { fromA: string; fromB: string };
-  exit?: "main" | "west" | "east" | "north";
+  exit?: "main" | "west" | "east" | "north" | "south";
   /** steps on the far side: no way through for a wheelchair */
   steps?: boolean;
 }
 
-export const LINKS: Link[] = [
+const DEMO_LINKS: Link[] = [
   { id: "entry-lobby", a: "entry", b: "lobby", door: [0, 7], pa: [0, 8.4], pb: [0, 5.4], sign: { fromA: "corridor, signs to Science and Academic blocks", fromB: "MAIN ENTRANCE, green EXIT sign beyond" } },
   { id: "main-exit", a: "entry", b: "outside", door: [0, 10.5], pa: [0, 9.3], pb: [0, 15.5], exit: "main", sign: { fromA: "MAIN EXIT glass doors to the plaza", fromB: "main entrance" } },
   { id: "lobby-wcorr", a: "lobby", b: "wcorr", door: [-5.5, 2.5], pa: [-4.2, 2.5], pb: [-6.75, 2.5], sign: { fromA: "SCIENCE BLOCK / Chemistry Lab 1A", fromB: "central corridor" } },
@@ -47,8 +54,62 @@ export const LINKS: Link[] = [
   { id: "north-exit", a: "gym", b: "outside", door: [NORTH_EXIT_X, NORTH_Z], pa: [NORTH_EXIT_X, NORTH_Z + 1.4], pb: [NORTH_EXIT_X, NORTH_Z - 4], exit: "north", sign: { fromA: "FIRE EXIT (north) to the sports field, green running-man sign", fromB: "sports hall" } },
 ];
 
+/* ------------------------------------------------------------------ the plan */
+
+export interface PlanRoom {
+  id: RoomId;
+  name: string;
+  bounds: Bounds;
+  height: number;
+  /** what kind of room, for furniture and for people's expectations */
+  kind?: "corridor" | "classroom" | "lab" | "library" | "cafeteria" | "hall" | "office" | "entrance";
+  /** how many people are in it when the alarm goes, for a designed floor */
+  people?: number;
+}
+
+export interface Plan {
+  id: string;
+  label: string;
+  /** the hand-built campus, with its own 3D model, furniture and stepped exit */
+  demo: boolean;
+  rooms: PlanRoom[];
+  links: Link[];
+  scenarios: Scenario[];
+  fireSpots: Record<RoomId, P2>;
+  /** the footprint of the building */
+  bounds: Bounds;
+  /** for a designed floor: its walls, with door openings */
+  walls?: WallDef[];
+  /** for a designed floor: the settings it was made from, so a drill can rebuild it */
+  spec?: import("./floorplan").BuildingSpec;
+}
+
+/* the live view of the current plan: modules that import these always see the current one */
+export let plan: Plan;
+export let LINKS: Link[];
 /** Rooms people can start in, and where the fire can start. */
-export const INDOOR: RoomId[] = ["entry", "lobby", "wcorr", "ecorr", "sec", "vault", "annex", "atrium", "library", "cafe", "ncorr", "lecture", "complab", "gym"];
+export let INDOOR: RoomId[];
+export let SCENARIOS: Scenario[];
+
+
+/** Switch the building everything runs in. */
+export function setPlan(next: Plan) {
+  plan = next;
+  LINKS = next.links;
+  INDOOR = next.rooms.map((room) => room.id);
+  SCENARIOS = next.scenarios;
+  usePlan.setState({ plan: next });
+}
+
+export function roomAt(x: number, z: number): RoomId {
+  for (const room of plan.rooms) {
+    const b = room.bounds;
+    if (x >= b.minX && x <= b.maxX && z >= b.minZ && z <= b.maxZ) return room.id;
+  }
+  return "outside";
+}
+
+export const roomById = (id: RoomId) => plan.rooms.find((room) => room.id === id)!;
 
 export const placeName = (room: RoomId) => (room === "outside" ? "outside" : roomById(room).name.split(" / ").pop()!);
 
@@ -75,7 +136,8 @@ export function roomCenter(room: RoomId): P2 {
 
 /** Clear of the building, far enough from the doors to count as out. */
 export function isSafe(x: number, z: number) {
-  return roomAt(x, z) === "outside" && (z > 12.5 || x < -23.5 || x > 23.5 || z < NORTH_Z - 2);
+  const b = plan.bounds;
+  return roomAt(x, z) === "outside" && (z > b.maxZ + 2 || x < b.minX - 1.5 || x > b.maxX + 1.5 || z < b.minZ - 2);
 }
 
 /** The west fire exit opens onto a landing and three steps down to the lawn. */
@@ -83,6 +145,7 @@ export const WEST_STEPS = { fromX: -22.1, landing: 0.6, tread: 0.42, rise: 0.15,
 
 /** How high the ground is under a point: zero everywhere except outside the west exit, stepped or ramped. */
 export function floorHeight(x: number, z: number, ramped = false) {
+  if (!plan.demo) return 0;
   const s = WEST_STEPS;
   if (Math.abs(z - s.z) > s.halfWidth || x > s.fromX) return 0;
   const along = s.fromX - x;
@@ -102,7 +165,7 @@ export interface Scenario {
   blurb: string;
 }
 
-export const SCENARIOS: Scenario[] = [
+const DEMO_SCENARIOS: Scenario[] = [
   { id: "cafe-kitchen", label: "Kitchen fire in the Cafeteria", origin: "cafe", blurb: "The east fire exit is inside the fire room." },
   { id: "corridor", label: "Electrical fire in the Central Corridor", origin: "lobby", blurb: "The main route to the main exit fills first." },
   { id: "lab-gas", label: "Gas fire in Chemistry Lab 1A", origin: "sec", blurb: "Smoke pushes into the corridor from the west." },
@@ -145,11 +208,30 @@ export function smokeAt(room: RoomId, t: number, hops: Record<string, number>) {
   return step.peak * p * p * (3 - 2 * p);
 }
 
+/** How close to the flames burns, and how fast (health per second). */
+export const FIRE_REACH = 2.5;
+export const FIRE_BURN = 7;
+
+/** Health lost per second breathing this smoke: crawling under it, or sheltering behind a shut door, cuts the dose. */
+export const smokeDose = (smoke: number, crawling: boolean, sheltering: boolean) => (smoke > 0.1 ? smoke * 1.5 * (sheltering ? 0.2 : crawling ? 0.35 : 1) : 0);
+
 export const smokeWord = (s: number) => (s < 0.08 ? "clear" : s < 0.3 ? "light haze" : s < 0.6 ? "thick smoke" : "very thick, choking smoke");
 
 /** A small, fixed hot spot inside the origin room where the flames are. */
 export function fireSpot(origin: RoomId): P2 {
-  const spots: Partial<Record<RoomId, P2>> = {
+  return plan.fireSpots[origin] ?? roomCenter(origin);
+}
+
+/* ------------------------------------------------------------------ the demo campus */
+
+export const DEMO_PLAN: Plan = {
+  id: "demo",
+  label: "Demo campus",
+  demo: true,
+  rooms: ROOMS.filter((room) => room.id !== "outside").map((room) => ({ id: room.id, name: room.name, bounds: room.bounds, height: room.height ?? ROOM_H })),
+  links: DEMO_LINKS,
+  scenarios: DEMO_SCENARIOS,
+  fireSpots: {
     cafe: [15, -22.25], // open floor in front of the serving counter
     lobby: [-3.8, -4.5],
     sec: [-19.5, -4.4],
@@ -158,6 +240,11 @@ export function fireSpot(origin: RoomId): P2 {
     lecture: [-19, -40],
     complab: [3.5, -40.5],
     gym: [19.5, -40.5],
-  };
-  return spots[origin] ?? roomCenter(origin);
-}
+  },
+  bounds: { minX: -22, maxX: 22, minZ: NORTH_Z, maxZ: 10.5 },
+};
+
+/** The building in use, for React: it starts as the demo campus on the server and in the browser alike. */
+export const usePlan = create<{ plan: Plan }>(() => ({ plan: DEMO_PLAN }));
+
+setPlan(DEMO_PLAN);

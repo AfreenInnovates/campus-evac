@@ -1,15 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { ROOMS, type RoomId } from "../level";
 import type { AuditDrill, LabConfig } from "./engine";
 import { FIXES, fixById, type FixId } from "./fixes";
 import { costOf } from "./prompts";
-import { addFrames, emptyHeat, HEAT, paintHeat } from "./heat";
+import { addCrowdFrames, addFrames, emptyHeat, heatArea, paintHeat } from "./heat";
 import { replayById } from "./replay";
 import { scorecard, ScorecardView } from "./Scorecard";
 import type { QueueItem } from "./Training";
-import { LINKS, placeName, SCENARIOS } from "./world";
+import { DEMO_PLAN, plan as currentPlan, SCENARIOS, type Plan, type RoomId } from "./world";
+import { planFor, type BuildingSpec } from "./floorplan";
 
 /**
  * The building audit: the same people, the fire started in every room in turn, and one
@@ -26,6 +26,8 @@ import { LINKS, placeName, SCENARIOS } from "./world";
 export interface AuditRun {
   at: number;
   seed: number;
+  /** the designed floor it was run on; none for the demo campus */
+  building?: BuildingSpec;
   total: number;
   /** none for the building as it is; the changes under test for a trial */
   fixes: FixId[];
@@ -57,9 +59,9 @@ function writeAudit(which: Which, run: AuditRun | null) {
 export const PROOF_RUNS = 3;
 
 /** The same crowd through each fire, with the given changes made to the building. */
-function drillsFor(seed: number, agents: number, scenarioIds: string[], fixes: FixId[]): QueueItem[] {
+function drillsFor(seed: number, agents: number, scenarioIds: string[], fixes: FixId[], building?: BuildingSpec): QueueItem[] {
   return scenarioIds.map((scenarioId) => ({
-    config: { scenarioId, agents, warden: "ai", seed, wardenEvery: 12, playbook: true, fixes } satisfies LabConfig,
+    config: { scenarioId, agents, warden: "ai", seed, wardenEvery: 12, playbook: true, fixes, building } satisfies LabConfig,
     tag: "audit",
     learn: false,
   }));
@@ -67,9 +69,10 @@ function drillsFor(seed: number, agents: number, scenarioIds: string[], fixes: F
 
 /** Start a fresh audit and return the drills to queue: every fire, the same crowd. */
 export function beginAudit(seed: number, agents = 12): QueueItem[] {
-  writeAudit("baseline", { at: Date.now(), seed, total: SCENARIOS.length, fixes: [], drills: [] });
+  const building = currentPlan.spec;
+  writeAudit("baseline", { at: Date.now(), seed, building, total: SCENARIOS.length, fixes: [], drills: [] });
   writeAudit("trial", null);
-  return drillsFor(seed, agents, SCENARIOS.map((scenario) => scenario.id), []);
+  return drillsFor(seed, agents, SCENARIOS.map((scenario) => scenario.id), [], building);
 }
 
 /** The fires worth rerunning to prove a fix: wherever someone was lost, else wherever anyone had trouble. */
@@ -84,8 +87,8 @@ export function beginTrial(fixes: FixId[]): QueueItem[] {
   const base = readAudit();
   if (!base) return [];
   const fires = firesToProve(base).flatMap((id) => Array<string>(PROOF_RUNS).fill(id));
-  writeAudit("trial", { at: Date.now(), seed: base.seed, total: fires.length, fixes, drills: [] });
-  return drillsFor(base.seed, base.drills[0]?.agents ?? 12, fires, fixes);
+  writeAudit("trial", { at: Date.now(), seed: base.seed, building: base.building, total: fires.length, fixes, drills: [] });
+  return drillsFor(base.seed, 12, fires, fixes, base.building);
 }
 
 export function recordAuditDrill(drill: AuditDrill) {
@@ -386,23 +389,32 @@ function FixAndProve({ run, busy, onProve }: { run: AuditRun; busy: boolean; onP
 /* ------------------------------------------------------------------ risk map */
 
 const riskColor = (rate: number) => (rate >= 100 ? "#2fd18f" : rate >= 85 ? "#facc15" : rate >= 65 ? "#fb923c" : "#ef4444");
-const MAP_ROOMS = ROOMS.filter((room) => room.id !== "outside");
 
 /** Every audited fire's recording, combined into one picture of where people got stuck. */
 async function auditHeat(run: AuditRun) {
-  const heat = emptyHeat();
+  const heat = emptyHeat(heatArea((run.building ? planFor(run.building) : DEMO_PLAN).bounds));
   for (const drill of run.drills) {
     const replay = drill.replayId ? await replayById(drill.replayId) : null;
     if (replay) addFrames(heat, replay.frames, replay.people.length);
+    if (replay?.crowd) addCrowdFrames(heat, replay.crowd);
   }
   return paintHeat(heat, 6).toDataURL("image/png");
 }
 
+/** A room's own short name, from the plan being drawn (which may not be the building in use). */
+const shortName = (name: string) => name.split(" / ").pop()!;
+
 /** The floor plan, north up, each room coloured by how many survived when the fire started there; or, with `heat`, where people got stuck. */
-function RiskMap({ byOrigin, exits, heat }: { byOrigin: Map<RoomId, AuditDrill>; exits: Record<string, number>; heat?: string | null }) {
+function RiskMap({ plan, byOrigin, exits, heat }: { plan: Plan; byOrigin: Map<RoomId, AuditDrill>; exits: Record<string, number>; heat?: string | null }) {
+  const b0 = plan.bounds;
   return (
-    <svg viewBox="-23 -44.5 46 56" className="h-auto max-h-[22rem] w-full" role="img" aria-label={heat ? "Where people got stuck" : "Risk map of the building"}>
-      {MAP_ROOMS.map((room) => {
+    <svg
+      viewBox={`${b0.minX - 1} ${b0.minZ - 1.5} ${b0.maxX - b0.minX + 2} ${b0.maxZ - b0.minZ + 3}`}
+      className="h-auto max-h-[22rem] w-full"
+      role="img"
+      aria-label={heat ? "Where people got stuck" : "Risk map of the building"}
+    >
+      {plan.rooms.map((room) => {
         const b = room.bounds;
         const drill = byOrigin.get(room.id);
         const rate = drill ? pct(drill.survived, drill.agents) : null;
@@ -421,7 +433,7 @@ function RiskMap({ byOrigin, exits, heat }: { byOrigin: Map<RoomId, AuditDrill>;
             />
             {!small && !heat && (
               <text x={(b.minX + b.maxX) / 2} y={(b.minZ + b.maxZ) / 2} textAnchor="middle" fontSize={1.3} fontWeight={800} fill={rate === null ? "#bdb3c9" : "#16111e"}>
-                <tspan x={(b.minX + b.maxX) / 2}>{placeName(room.id)}</tspan>
+                <tspan x={(b.minX + b.maxX) / 2}>{shortName(room.name)}</tspan>
                 {rate !== null && (
                   <tspan x={(b.minX + b.maxX) / 2} dy={1.8} fontSize={1.6}>
                     {drill!.survived}/{drill!.agents}
@@ -432,14 +444,17 @@ function RiskMap({ byOrigin, exits, heat }: { byOrigin: Map<RoomId, AuditDrill>;
           </g>
         );
       })}
-      {heat && <image href={heat} x={HEAT.minX} y={HEAT.minZ} width={HEAT.maxX - HEAT.minX} height={HEAT.maxZ - HEAT.minZ} preserveAspectRatio="none" />}
+      {heat && (() => {
+        const a = heatArea(plan.bounds);
+        return <image href={heat} x={a.minX} y={a.minZ} width={a.maxX - a.minX} height={a.maxZ - a.minZ} preserveAspectRatio="none" />;
+      })()}
       {heat &&
-        MAP_ROOMS.filter((room) => room.bounds.maxX - room.bounds.minX >= 5 && room.bounds.maxZ - room.bounds.minZ >= 4.5).map((room) => (
+        plan.rooms.filter((room) => room.bounds.maxX - room.bounds.minX >= 5 && room.bounds.maxZ - room.bounds.minZ >= 4.5).map((room) => (
           <text key={room.id} x={(room.bounds.minX + room.bounds.maxX) / 2} y={room.bounds.minZ + 1.6} textAnchor="middle" fontSize={1.1} fontWeight={800} fill="#bdb3c9">
-            {placeName(room.id)}
+            {shortName(room.name)}
           </text>
         ))}
-      {LINKS.filter((link) => link.exit).map((link) => (
+      {plan.links.filter((link) => link.exit).map((link) => (
         <g key={link.id}>
           <circle cx={link.door[0]} cy={link.door[1]} r={1.2} fill="#16a34a" stroke="#fff" strokeWidth={0.25} />
           <text x={link.door[0]} y={link.door[1] + 0.45} textAnchor="middle" fontSize={1.2} fontWeight={900} fill="#fff">
@@ -525,7 +540,7 @@ export default function AuditPanel({
                     </button>
                   ))}
                 </div>
-                <RiskMap byOrigin={report.byOrigin} exits={report.exits} heat={mapMode === "stuck" ? heat ?? "" : null} />
+                <RiskMap plan={run?.building ? planFor(run.building) : DEMO_PLAN} byOrigin={report.byOrigin} exits={report.exits} heat={mapMode === "stuck" ? heat ?? "" : null} />
                 <p className="mt-1 text-[10px] leading-snug text-paper/50">
                   {mapMode === "risk"
                     ? "Room colour: how many survived when the fire started there (green all, yellow most, orange many lost, red worst). Grey: no fire there. Green circles: people out through each exit, all fires."

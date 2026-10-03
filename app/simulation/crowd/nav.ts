@@ -6,44 +6,84 @@ import type { P2 } from "./world";
  * The map is not authored: it is read off the building's own physics colliders once, by
  * probing a person-sized box at every cell. Walls, furniture, stacks and counters all block
  * it for free, so an agent's path goes round the lab benches the way a person would.
+ *
+ * A grid covers whatever area it was built for, so it fits any building; its search arrays
+ * are allocated once with it and reused by every path search.
  */
 
 export const CELL = 0.4;
-const MIN_X = -31;
-const MAX_X = 31;
-const MIN_Z = -51;
-const MAX_Z = 29;
-export const COLS = Math.round((MAX_X - MIN_X) / CELL);
-export const ROWS = Math.round((MAX_Z - MIN_Z) / CELL);
 
 export interface NavGrid {
+  minX: number;
+  minZ: number;
+  cols: number;
+  rows: number;
   blocked: Uint8Array;
+  // reused by every search on this grid
+  g: Float32Array;
+  f: Float32Array;
+  from: Int32Array;
+  seen: Uint32Array;
+  stamp: number;
 }
 
-const index = (c: number, r: number) => r * COLS + c;
-export const cellOf = (x: number, z: number): [number, number] => [
-  Math.max(0, Math.min(COLS - 1, Math.floor((x - MIN_X) / CELL))),
-  Math.max(0, Math.min(ROWS - 1, Math.floor((z - MIN_Z) / CELL))),
+const index = (grid: NavGrid, c: number, r: number) => r * grid.cols + c;
+
+export const cellOf = (grid: NavGrid, x: number, z: number): [number, number] => [
+  Math.max(0, Math.min(grid.cols - 1, Math.floor((x - grid.minX) / CELL))),
+  Math.max(0, Math.min(grid.rows - 1, Math.floor((z - grid.minZ) / CELL))),
 ];
-export const centerOf = (c: number, r: number): P2 => [MIN_X + (c + 0.5) * CELL, MIN_Z + (r + 0.5) * CELL];
+export const centerOf = (grid: NavGrid, c: number, r: number): P2 => [grid.minX + (c + 0.5) * CELL, grid.minZ + (r + 0.5) * CELL];
 
 /** `probe(x, z)` answers whether a person-sized box centred there touches anything solid. */
-export function buildGrid(probe: (x: number, z: number) => boolean): NavGrid {
-  const blocked = new Uint8Array(COLS * ROWS);
-  for (let r = 0; r < ROWS; r++)
-    for (let c = 0; c < COLS; c++) {
-      const [x, z] = centerOf(c, r);
-      blocked[index(c, r)] = probe(x, z) ? 1 : 0;
+export function buildGrid(probe: (x: number, z: number) => boolean, area: { minX: number; maxX: number; minZ: number; maxZ: number }): NavGrid {
+  const cols = Math.round((area.maxX - area.minX) / CELL);
+  const rows = Math.round((area.maxZ - area.minZ) / CELL);
+  const size = cols * rows;
+  const grid: NavGrid = {
+    minX: area.minX,
+    minZ: area.minZ,
+    cols,
+    rows,
+    blocked: new Uint8Array(size),
+    g: new Float32Array(size),
+    f: new Float32Array(size),
+    from: new Int32Array(size),
+    seen: new Uint32Array(size),
+    stamp: 0,
+  };
+  for (let r = 0; r < rows; r++)
+    for (let c = 0; c < cols; c++) {
+      const [x, z] = centerOf(grid, c, r);
+      grid.blocked[index(grid, c, r)] = probe(x, z) ? 1 : 0;
     }
-  return { blocked };
+  return grid;
 }
 
-export const walkable = (grid: NavGrid, c: number, r: number) =>
-  c >= 0 && r >= 0 && c < COLS && r < ROWS && grid.blocked[index(c, r)] === 0;
+/**
+ * The same map with a disc blocked off: the flames. Nobody plans a route through a fire; if it
+ * fills a corridor, people on each side have to use the ways out on their own side.
+ * The search arrays are shared with the original, so this costs one small copy per drill.
+ */
+export function withBlockedDisc(grid: NavGrid, x: number, z: number, radius: number): NavGrid {
+  const blocked = grid.blocked.slice();
+  const [c0, r0] = cellOf(grid, x, z);
+  const cells = Math.ceil(radius / CELL);
+  for (let dr = -cells; dr <= cells; dr++)
+    for (let dc = -cells; dc <= cells; dc++) {
+      const c = c0 + dc;
+      const r = r0 + dr;
+      if (c < 0 || r < 0 || c >= grid.cols || r >= grid.rows) continue;
+      if (Math.hypot(dc, dr) * CELL <= radius) blocked[index(grid, c, r)] = 1;
+    }
+  return { ...grid, blocked };
+}
+
+export const walkable = (grid: NavGrid, c: number, r: number) => c >= 0 && r >= 0 && c < grid.cols && r < grid.rows && grid.blocked[index(grid, c, r)] === 0;
 
 /** The nearest standing spot to a point, searching outward ring by ring. */
 export function nearestFree(grid: NavGrid, x: number, z: number): [number, number] | null {
-  const [c0, r0] = cellOf(x, z);
+  const [c0, r0] = cellOf(grid, x, z);
   if (walkable(grid, c0, r0)) return [c0, r0];
   for (let ring = 1; ring < 12; ring++)
     for (let dc = -ring; dc <= ring; dc++)
@@ -106,20 +146,15 @@ class Heap {
   }
 }
 
-const g = new Float32Array(COLS * ROWS);
-const f = new Float32Array(COLS * ROWS);
-const from = new Int32Array(COLS * ROWS);
-const seen = new Uint32Array(COLS * ROWS);
-let stamp = 0;
-
 /** Shortest walk from one point to another, smoothed to as few straight legs as possible. */
 export function findPath(grid: NavGrid, start: P2, goal: P2): P2[] | null {
   const s = nearestFree(grid, start[0], start[1]);
   const e = nearestFree(grid, goal[0], goal[1]);
   if (!s || !e) return null;
-  stamp++;
-  const si = index(s[0], s[1]);
-  const ei = index(e[0], e[1]);
+  const { g, f, from, seen, cols } = grid;
+  const stamp = ++grid.stamp;
+  const si = index(grid, s[0], s[1]);
+  const ei = index(grid, e[0], e[1]);
   const h = (c: number, r: number) => {
     const dx = Math.abs(c - e[0]);
     const dr = Math.abs(r - e[1]);
@@ -141,8 +176,8 @@ export function findPath(grid: NavGrid, start: P2, goal: P2): P2[] | null {
     }
     if (closed.has(cur)) continue;
     closed.add(cur);
-    const c = cur % COLS;
-    const r = (cur - c) / COLS;
+    const c = cur % cols;
+    const r = (cur - c) / cols;
     for (let dc = -1; dc <= 1; dc++)
       for (let dr = -1; dr <= 1; dr++) {
         if (!dc && !dr) continue;
@@ -151,7 +186,7 @@ export function findPath(grid: NavGrid, start: P2, goal: P2): P2[] | null {
         if (!walkable(grid, nc, nr)) continue;
         // no corner cutting past a blocked cell
         if (dc && dr && (!walkable(grid, c + dc, r) || !walkable(grid, c, r + dr))) continue;
-        const ni = index(nc, nr);
+        const ni = index(grid, nc, nr);
         const cost = g[cur] + (dc && dr ? 1.414 : 1);
         if (seen[ni] === stamp && cost >= g[ni]) continue;
         seen[ni] = stamp;
@@ -164,7 +199,7 @@ export function findPath(grid: NavGrid, start: P2, goal: P2): P2[] | null {
   if (!found) return null;
 
   const cells: [number, number][] = [];
-  for (let i = ei; i !== -1; i = from[i]) cells.push([i % COLS, Math.floor(i / COLS)]);
+  for (let i = ei; i !== -1; i = from[i]) cells.push([i % cols, Math.floor(i / cols)]);
   cells.reverse();
   // string-pull: keep only the corners a straight walk cannot skip
   const legs: [number, number][] = [cells[0]];
@@ -176,9 +211,9 @@ export function findPath(grid: NavGrid, start: P2, goal: P2): P2[] | null {
     }
   }
   legs.push(cells[cells.length - 1]);
-  const points = legs.map(([c, r]) => centerOf(c, r));
+  const points = legs.map(([c, r]) => centerOf(grid, c, r));
   // finish exactly on the goal when it is standable, not on the centre of its cell
-  const [gc, gr] = cellOf(goal[0], goal[1]);
+  const [gc, gr] = cellOf(grid, goal[0], goal[1]);
   if (walkable(grid, gc, gr)) points[points.length - 1] = [goal[0], goal[1]];
   return points;
 }
