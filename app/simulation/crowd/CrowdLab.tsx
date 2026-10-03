@@ -877,6 +877,7 @@ export default function CrowdLab() {
               {details ? "Simple" : "Details"}
             </button>
           )}
+          {started && <HeatToggle compact={compact} />}
           {started && (
             <button onClick={newSetup} className={barButton}>
               New
@@ -986,7 +987,7 @@ export default function CrowdLab() {
         <div className={`pointer-events-auto absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-3 border-2 border-sun bg-night/90 px-3 py-1.5 ${compact ? "top-12" : "top-[4.2rem]"}`}>
           <span className="signal-pulse h-2 w-2 rounded-full bg-sun" />
           <span className="text-[11px] font-black uppercase tracking-[0.12em] text-sun">
-            {queue.label === "Training drill" ? "Training the warden" : queue.label} · {queue.items[queue.index].tag === "audit" ? `fire ${queue.index + 1} of ${queue.items.length}` : `drill ${queue.index + 1} of ${queue.items.length}`}
+            {queue.label === "Training drill" ? "Training the warden" : queue.label} · {queue.label === "Proving the fixes" ? `run ${queue.index + 1} of ${queue.items.length}` : queue.items[queue.index].tag === "audit" ? `fire ${queue.index + 1} of ${queue.items.length}` : `drill ${queue.index + 1} of ${queue.items.length}`}
           </span>
           {reviewing && <span className="text-[10px] text-paper/70">Nemotron Ultra is reviewing the drill…</span>}
           <PlaybookBadge />
@@ -1054,6 +1055,22 @@ export default function CrowdLab() {
       )}
       <PortraitBlock onBlock={pauseRun} />
     </div>
+  );
+}
+
+/** Show or hide the "where people got stuck" heatmap on the floor. */
+function HeatToggle({ compact }: { compact: boolean }) {
+  const on = useSpectator((s) => s.heat);
+  return (
+    <button
+      onClick={() => useSpectator.setState({ heat: !on })}
+      aria-pressed={on}
+      title="Where people stood still inside, and where anyone collapsed"
+      className={`${barButton} border-[#fb923c]/70 text-[#fb923c]`}
+      style={on ? { background: "#fb923c", color: "#16111e" } : undefined}
+    >
+      {compact ? "Heat" : "Heatmap"}
+    </button>
   );
 }
 

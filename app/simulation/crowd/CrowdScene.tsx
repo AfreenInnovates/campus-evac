@@ -17,9 +17,10 @@ import { create } from "zustand";
 import { fireSpot, floorHeight, INDOOR, LINKS, placeName, roomCenter, smokeAt, WEST_STEPS } from "./world";
 import Human from "./Human";
 import { hasFix } from "./fixes";
+import { addFrames, emptyHeat, HEAT, paintHeat } from "./heat";
 
 /** Which person the spectator camera is riding along with, and whether the map is ready. */
-export const useSpectator = create<{ follow: number | null; navReady: boolean }>(() => ({ follow: null, navReady: false }));
+export const useSpectator = create<{ follow: number | null; navReady: boolean; heat: boolean }>(() => ({ follow: null, navReady: false, heat: false }));
 
 /* ------------------------------------------------------------------ navigation map */
 
@@ -214,6 +215,55 @@ function WestSteps() {
         </div>
       </Html>
     </group>
+  );
+}
+
+/* ------------------------------------------------------------------ heatmap */
+
+/**
+ * Where people stood still, glowing on the floor. Painted from the drill's own recording, so
+ * it works live, after a drill and on a replay; while a drill runs it refreshes every couple
+ * of seconds, never per frame.
+ */
+/** Seen by the spectator, never by the warden's camera: an orange glow must not read as fire. */
+const SPECTATOR_ONLY = 1;
+
+function HeatOverlay() {
+  const on = useSpectator((s) => s.heat);
+  const get = useThree((s) => s.get);
+  useEffect(() => {
+    get().camera.layers.enable(SPECTATOR_ONLY);
+  }, [get]);
+  const material = useRef<THREE.MeshBasicMaterial>(null);
+  const since = useRef(Infinity);
+  useEffect(() => {
+    since.current = Infinity; // repaint as soon as it is switched on
+  }, [on]);
+  useEffect(() => () => material.current?.map?.dispose(), []);
+  useFrame((_, dt) => {
+    const m = material.current;
+    if (!on || !m) return;
+    since.current += dt;
+    if (since.current < 2) return;
+    since.current = 0;
+    const frames = lab.playback?.frames ?? lab.rec.frames;
+    const image = paintHeat(addFrames(emptyHeat(), frames, lab.agents.length));
+    if (!m.map) {
+      m.map = new THREE.CanvasTexture(image);
+      m.map.colorSpace = THREE.SRGBColorSpace;
+      m.opacity = 1;
+      m.needsUpdate = true;
+    } else {
+      m.map.image = image;
+      m.map.needsUpdate = true;
+    }
+  });
+  // stays mounted, so its one texture is reused rather than rebuilt on every toggle
+  return (
+    <mesh visible={on} layers={SPECTATOR_ONLY} position={[(HEAT.minX + HEAT.maxX) / 2, 0.07, (HEAT.minZ + HEAT.maxZ) / 2]} rotation={[-Math.PI / 2, 0, 0]} renderOrder={9}>
+      <planeGeometry args={[HEAT.maxX - HEAT.minX, HEAT.maxZ - HEAT.minZ]} />
+      <meshBasicMaterial ref={material} transparent opacity={0} depthWrite={false} toneMapped={false} />
+    </mesh>
   );
 }
 
@@ -510,6 +560,7 @@ export default memo(function CrowdScene() {
         <StaticShadows />
         <People />
         <WestSteps />
+        <HeatOverlay />
         <Signposts />
         <Fire />
         <SmokeHaze />

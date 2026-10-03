@@ -5,6 +5,8 @@ import { ROOMS, type RoomId } from "../level";
 import type { AuditDrill, LabConfig } from "./engine";
 import { FIXES, fixById, type FixId } from "./fixes";
 import { costOf } from "./prompts";
+import { addFrames, emptyHeat, HEAT, paintHeat } from "./heat";
+import { replayById } from "./replay";
 import type { QueueItem } from "./Training";
 import { LINKS, placeName, SCENARIOS } from "./world";
 
@@ -50,6 +52,9 @@ function writeAudit(which: Which, run: AuditRun | null) {
   }
 }
 
+/** Each fire is rerun this many times to prove a fix: the AI people vary from run to run, one run is an anecdote. */
+export const PROOF_RUNS = 3;
+
 /** The same crowd through each fire, with the given changes made to the building. */
 function drillsFor(seed: number, agents: number, scenarioIds: string[], fixes: FixId[]): QueueItem[] {
   return scenarioIds.map((scenarioId) => ({
@@ -77,7 +82,7 @@ export function firesToProve(run: AuditRun) {
 export function beginTrial(fixes: FixId[]): QueueItem[] {
   const base = readAudit();
   if (!base) return [];
-  const fires = firesToProve(base);
+  const fires = firesToProve(base).flatMap((id) => Array<string>(PROOF_RUNS).fill(id));
   writeAudit("trial", { at: Date.now(), seed: base.seed, total: fires.length, fixes, drills: [] });
   return drillsFor(base.seed, base.drills[0]?.agents ?? 12, fires, fixes);
 }
@@ -85,7 +90,10 @@ export function beginTrial(fixes: FixId[]): QueueItem[] {
 export function recordAuditDrill(drill: AuditDrill) {
   const which: Which = drill.fixes?.length ? "trial" : "baseline";
   const run = readAudit(which);
-  if (run) writeAudit(which, { ...run, drills: [...run.drills.filter((d) => d.scenarioId !== drill.scenarioId), drill] });
+  if (!run) return;
+  // an audit has one drill per fire; a trial keeps every repeat
+  const kept = which === "baseline" ? run.drills.filter((d) => d.scenarioId !== drill.scenarioId) : run.drills;
+  writeAudit(which, { ...run, drills: [...kept, drill] });
 }
 
 /* ------------------------------------------------------------------ the numbers */
@@ -215,17 +223,20 @@ export function compareTrial(base: AuditRun, trial: AuditRun) {
   return {
     before,
     after,
-    fires: before.drills.map((d) => ({ before: d, after: trial.drills.find((t) => t.scenarioId === d.scenarioId)! })),
+    fires: before.drills.map((d) => {
+      const runs = trial.drills.filter((t) => t.scenarioId === d.scenarioId);
+      return { before: d, runs: runs.length, survived: runs.reduce((n, r) => n + r.survived, 0), seen: runs.reduce((n, r) => n + r.agents, 0), replayId: runs.at(-1)?.replayId ?? null };
+    }),
     groups: before.risk.map((g) => ({ before: g, after: afterByKind.get(g.kind) })),
   };
 }
 
-function Delta({ before, after, whole }: { before: number; after: number; whole: number }) {
-  const better = after > before;
-  const worse = after < before;
+/** "0/1 → 3/3": compared as rates, since the trial repeats each fire. */
+function Delta({ before, of, after, outOf }: { before: number; of: number; after: number; outOf: number }) {
+  const change = after / Math.max(1, outOf) - before / Math.max(1, of);
   return (
     <span className="font-mono">
-      {before}/{whole} → <b className={better ? "text-mint" : worse ? "text-danger" : "text-paper"}>{after}/{whole}</b>
+      {before}/{of} → <b className={change > 0.001 ? "text-mint" : change < -0.001 ? "text-danger" : "text-paper"}>{after}/{outOf}</b>
     </span>
   );
 }
@@ -237,7 +248,7 @@ function BeforeAfter({ base, trial, onWatch }: { base: AuditRun; trial: AuditRun
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <h3 className="text-[11px] font-black uppercase tracking-[0.16em] text-mint">Proof: the same people, the same fires, with the fixes</h3>
         <span className="text-[10px] text-paper/50">
-          {trial.drills.length < trial.total ? `${trial.drills.length} of ${trial.total} fires rerun so far` : `${trial.total} fires rerun`}
+          {trial.drills.length < trial.total ? `${trial.drills.length} of ${trial.total} runs so far` : `${trial.total} runs`} · each fire {PROOF_RUNS}× with the fixes
         </span>
       </div>
       <p className="mt-1 text-[11px] text-paper/60">With: {trial.fixes.map((id) => fixById(id).title).join(" · ")}</p>
@@ -248,13 +259,13 @@ function BeforeAfter({ base, trial, onWatch }: { base: AuditRun; trial: AuditRun
             {pct(c.before.survived, c.before.total)}% → <span className="text-mint">{pct(c.after.survived, c.after.total)}%</span>
           </div>
           <ul className="mt-1 space-y-0.5 text-[12px]">
-            {c.fires.map(({ before, after }) => (
+            {c.fires.map(({ before, runs, survived, seen, replayId }) => (
               <li key={before.scenarioId} className="flex items-center justify-between gap-2">
                 <span className="truncate">{before.scenario}</span>
                 <span className="flex shrink-0 items-center gap-2">
-                  {after ? <Delta before={before.survived} after={after.survived} whole={before.agents} /> : <span className="text-paper/40">pending</span>}
-                  {after?.replayId && (
-                    <button onClick={() => onWatch(after.replayId!, `${before.scenario}, with fixes`)} className="text-[10px] font-black text-[#38bdf8] underline">
+                  {runs ? <Delta before={before.survived} of={before.agents} after={survived} outOf={seen} /> : <span className="text-paper/40">pending</span>}
+                  {replayId && (
+                    <button onClick={() => onWatch(replayId, `${before.scenario}, with fixes`)} className="text-[10px] font-black text-[#38bdf8] underline">
                       watch
                     </button>
                   )}
@@ -271,7 +282,7 @@ function BeforeAfter({ base, trial, onWatch }: { base: AuditRun; trial: AuditRun
                 <span className="truncate">
                   {before.icon} {before.label}
                 </span>
-                {after ? <Delta before={before.survived} after={after.survived} whole={before.seen} /> : <span className="text-paper/40">pending</span>}
+                {after ? <Delta before={before.survived} of={before.seen} after={after.survived} outOf={after.seen} /> : <span className="text-paper/40">pending</span>}
               </li>
             ))}
           </ul>
@@ -341,7 +352,7 @@ function FixAndProve({ run, busy, onProve }: { run: AuditRun; busy: boolean; onP
         </p>
       )}
       <button onClick={() => onProve([...chosen])} disabled={busy || !chosen.size} className="brutal-button mt-3 px-4 py-2 disabled:opacity-50">
-        Prove it: rerun {fires} {fires === 1 ? "fire" : "fires"} with {chosen.size || "no"} {chosen.size === 1 ? "fix" : "fixes"}
+        Prove it: rerun {fires} {fires === 1 ? "fire" : "fires"} {PROOF_RUNS}× with {chosen.size || "no"} {chosen.size === 1 ? "fix" : "fixes"}
       </button>
     </div>
   );
@@ -352,10 +363,20 @@ function FixAndProve({ run, busy, onProve }: { run: AuditRun; busy: boolean; onP
 const riskColor = (rate: number) => (rate >= 100 ? "#2fd18f" : rate >= 85 ? "#facc15" : rate >= 65 ? "#fb923c" : "#ef4444");
 const MAP_ROOMS = ROOMS.filter((room) => room.id !== "outside");
 
-/** The floor plan, north up, each room coloured by how many survived when the fire started there. */
-function RiskMap({ byOrigin, exits }: { byOrigin: Map<RoomId, AuditDrill>; exits: Record<string, number> }) {
+/** Every audited fire's recording, combined into one picture of where people got stuck. */
+async function auditHeat(run: AuditRun) {
+  const heat = emptyHeat();
+  for (const drill of run.drills) {
+    const replay = drill.replayId ? await replayById(drill.replayId) : null;
+    if (replay) addFrames(heat, replay.frames, replay.people.length);
+  }
+  return paintHeat(heat, 6).toDataURL("image/png");
+}
+
+/** The floor plan, north up, each room coloured by how many survived when the fire started there; or, with `heat`, where people got stuck. */
+function RiskMap({ byOrigin, exits, heat }: { byOrigin: Map<RoomId, AuditDrill>; exits: Record<string, number>; heat?: string | null }) {
   return (
-    <svg viewBox="-23 -44.5 46 56" className="h-auto max-h-[22rem] w-full" role="img" aria-label="Risk map of the building">
+    <svg viewBox="-23 -44.5 46 56" className="h-auto max-h-[22rem] w-full" role="img" aria-label={heat ? "Where people got stuck" : "Risk map of the building"}>
       {MAP_ROOMS.map((room) => {
         const b = room.bounds;
         const drill = byOrigin.get(room.id);
@@ -363,8 +384,17 @@ function RiskMap({ byOrigin, exits }: { byOrigin: Map<RoomId, AuditDrill>; exits
         const small = b.maxX - b.minX < 5 || b.maxZ - b.minZ < 4.5;
         return (
           <g key={room.id}>
-            <rect x={b.minX} y={b.minZ} width={b.maxX - b.minX} height={b.maxZ - b.minZ} fill={rate === null ? "#2a2433" : riskColor(rate)} fillOpacity={rate === null ? 1 : 0.8} stroke="#16111e" strokeWidth={0.3} />
-            {!small && (
+            <rect
+              x={b.minX}
+              y={b.minZ}
+              width={b.maxX - b.minX}
+              height={b.maxZ - b.minZ}
+              fill={heat || rate === null ? "#2a2433" : riskColor(rate)}
+              fillOpacity={heat || rate === null ? 1 : 0.8}
+              stroke="#16111e"
+              strokeWidth={0.3}
+            />
+            {!small && !heat && (
               <text x={(b.minX + b.maxX) / 2} y={(b.minZ + b.maxZ) / 2} textAnchor="middle" fontSize={1.3} fontWeight={800} fill={rate === null ? "#bdb3c9" : "#16111e"}>
                 <tspan x={(b.minX + b.maxX) / 2}>{placeName(room.id)}</tspan>
                 {rate !== null && (
@@ -377,6 +407,13 @@ function RiskMap({ byOrigin, exits }: { byOrigin: Map<RoomId, AuditDrill>; exits
           </g>
         );
       })}
+      {heat && <image href={heat} x={HEAT.minX} y={HEAT.minZ} width={HEAT.maxX - HEAT.minX} height={HEAT.maxZ - HEAT.minZ} preserveAspectRatio="none" />}
+      {heat &&
+        MAP_ROOMS.filter((room) => room.bounds.maxX - room.bounds.minX >= 5 && room.bounds.maxZ - room.bounds.minZ >= 4.5).map((room) => (
+          <text key={room.id} x={(room.bounds.minX + room.bounds.maxX) / 2} y={room.bounds.minZ + 1.6} textAnchor="middle" fontSize={1.1} fontWeight={800} fill="#bdb3c9">
+            {placeName(room.id)}
+          </text>
+        ))}
       {LINKS.filter((link) => link.exit).map((link) => (
         <g key={link.id}>
           <circle cx={link.door[0]} cy={link.door[1]} r={1.2} fill="#16a34a" stroke="#fff" strokeWidth={0.25} />
@@ -407,6 +444,13 @@ export default function AuditPanel({
   const [run] = useState(() => readAudit());
   const [trial] = useState(() => readAudit("trial"));
   const report = run && run.drills.length ? summariseAudit(run) : null;
+  // the map shows risk by fire room, or where people got stuck across every fire
+  const [mapMode, setMapMode] = useState<"risk" | "stuck">("risk");
+  const [heat, setHeat] = useState<string | null>(null);
+  const showStuck = async () => {
+    setMapMode("stuck");
+    if (!heat && run) setHeat(await auditHeat(run));
+  };
   const worst = report?.drills[0];
 
   return (
@@ -440,11 +484,27 @@ export default function AuditPanel({
             )}
             <div className="mt-4 grid gap-4 lg:grid-cols-[1fr_1.1fr]">
               <div className="border border-paper/15 bg-night/60 p-3">
-                <div className="text-[11px] font-black uppercase tracking-[0.14em] text-paper/60">Risk map</div>
-                <RiskMap byOrigin={report.byOrigin} exits={report.exits} />
+                <div className="flex items-center gap-1">
+                  {(
+                    [
+                      ["risk", "Risk by fire"],
+                      ["stuck", "Where people got stuck"],
+                    ] as const
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      onClick={mode === "risk" ? () => setMapMode("risk") : showStuck}
+                      className={`border px-2 py-0.5 text-[10px] font-black uppercase tracking-[0.1em] ${mapMode === mode ? "border-paper bg-paper text-ink" : "border-paper/25 text-paper/60"}`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <RiskMap byOrigin={report.byOrigin} exits={report.exits} heat={mapMode === "stuck" ? heat ?? "" : null} />
                 <p className="mt-1 text-[10px] leading-snug text-paper/50">
-                  Room colour: how many survived when the fire started there (green all, yellow most, orange many lost, red worst). Grey: no fire there. Green
-                  circles: people out through each exit, all fires.
+                  {mapMode === "risk"
+                    ? "Room colour: how many survived when the fire started there (green all, yellow most, orange many lost, red worst). Grey: no fire there. Green circles: people out through each exit, all fires."
+                    : "Glow: where people stood still inside, across every fire: bottlenecks, dead ends, hesitation. White crosses: where someone collapsed."}
                 </p>
               </div>
 

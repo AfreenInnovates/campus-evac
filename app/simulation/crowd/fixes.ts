@@ -4,7 +4,7 @@
  * buildings install or adopt; `basis` says why it is expected to help.
  */
 
-export type FixId = "ramp" | "strobes" | "text-alerts" | "low-signs" | "voice-alarm";
+export type FixId = "ramp" | "strobes" | "text-alerts" | "low-signs" | "voice-alarm" | "occupancy";
 
 export interface Fix {
   id: FixId;
@@ -51,6 +51,13 @@ export const FIXES: Fix[] = [
     detail: "The alarm is a recorded voice saying what is happening and to leave by the nearest exit.",
     helps: "people who panic or hesitate, people with headphones",
     basis: "Studies of real evacuations find spoken alarms shorten the delay before people start to move.",
+  },
+  {
+    id: "occupancy",
+    title: "Occupancy sensing for the warden",
+    detail: "Badge readers and Wi-Fi presence show the warden which room every person is in, live.",
+    helps: "anyone the warden would otherwise misplace on camera",
+    basis: "A camera can be misread in smoke; an order sent to the wrong room is worse than none.",
   },
 ];
 

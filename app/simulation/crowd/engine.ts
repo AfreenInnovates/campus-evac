@@ -187,6 +187,8 @@ export interface Agent {
   missedOrders: number;
   /** where they reached a fire exit they could not use */
   blockedAt: string | null;
+  /** the last room the warden addressed them as being in, when it was wrong */
+  misplaced: { said: string; was: string } | null;
   endedAt: number | null;
   exit: string | null;
   history: { t: number; room: string; choice: string; thought: string }[];
@@ -282,6 +284,17 @@ export const lab = {
   /** playback speed; live drills always run in real time */
   speed: 1,
 };
+
+/** The first room an order names, e.g. "Hana, leave the Chemistry Lab 1A by..." names Chemistry Lab 1A. */
+function firstRoomNamed(text: string): RoomId | null {
+  const s = text.toLowerCase();
+  let best: { room: RoomId; at: number } | null = null;
+  for (const room of INDOOR) {
+    const at = s.indexOf(placeName(room).toLowerCase());
+    if (at >= 0 && (!best || at < best.at)) best = { room, at };
+  }
+  return best?.room ?? null;
+}
 
 /** Whether this run's building has a given fix in place. */
 const fixed = (id: FixId) => hasFix(lab.config?.fixes, id);
@@ -427,6 +440,7 @@ export function setupRun(config: LabConfig) {
       noticedAt: persona.deaf && !fixed("strobes") ? null : 0,
       missedOrders: 0,
       blockedAt: null,
+      misplaced: null,
       endedAt: null,
       exit: null,
       history: [],
@@ -636,7 +650,9 @@ const PLAN = (() => {
     ] as const) {
       if (from === "outside") continue;
       const list = rooms.get(from) ?? [];
-      list.push(to === "outside" ? `${link.exit?.toUpperCase()} EXIT to outside` : `${placeName(to)} (sign: "${signFrom(link, from)}")`);
+      // the compass direction of each doorway, worked out from the map, so orders never send people the wrong way
+      const way = compass(roomCenter(from), link.door);
+      list.push(to === "outside" ? `${link.exit?.toUpperCase()} EXIT to outside (to the ${way})` : `${placeName(to)} (to the ${way}; sign: "${signFrom(link, from)}")`);
       rooms.set(from, list);
     }
   }
@@ -669,6 +685,9 @@ function deliver(text: string, people: number[] | null, kind: "warden" | "human"
       agent.pendingHear.push({ t: lab.t + 5, text: `(${helper.name} taps your shoulder and points, passing on the warden's message) ${clean}`, direct, target });
       continue;
     }
+    // an order that starts from the wrong room: the warden misread where this person is
+    const named = direct ? firstRoomNamed(clean) : null;
+    if (named && named !== agent.room && !(target?.kind === "room" && target.room === named)) agent.misplaced = { said: placeName(named), was: placeName(agent.room) };
     // a spoken alarm system is louder and clearer than a bell: headphones let less of it slip by
     const delay = fixed("voice-alarm") ? Math.min(agent.persona.hearingDelay, 3) : agent.persona.hearingDelay;
     agent.pendingHear.push({ t: lab.t + delay, text: clean, direct, target: direct ? target : null });
@@ -706,6 +725,10 @@ async function wardenTurn() {
       `Time since the alarm: ${Math.round(t)}s.`,
       `Roll call - still inside, not yet accounted for: ${inside.length ? inside.map((a) => `#${a.id} ${a.name}`).join(", ") : "nobody"}.`,
       ...inside.filter((a) => needsOf(a.persona)).map((a) => `Known needs (evacuation plan on file): #${a.id} ${a.name} - ${needsOf(a.persona)}.`),
+      // live presence data, when the building has it: more reliable than reading the camera
+      fixed("occupancy") && inside.length
+        ? `Occupancy sensors (live and reliable; trust these over the camera for where people are): ${inside.map((a) => `#${a.id} in the ${placeName(a.room)}`).join(", ")}.`
+        : "",
       `Already out and safe (give them no more orders): ${out.length ? out.map((a) => `#${a.id}`).join(", ") : "nobody yet"}.`,
       unordered.length ? `Still inside with no personal order from you yet: ${unordered.map((a) => `#${a.id}`).join(", ")}.` : "",
     ]
@@ -974,6 +997,7 @@ function troubleOf(a: Agent): string[] {
   if (a.missedOrders) out.push(`${a.missedOrders} order${a.missedOrders === 1 ? "" : "s"} by name never reached them (nobody beside them to pass it on)`);
   if (a.frozenFor > 3) out.push(`froze in panic for ${Math.round(a.frozenFor)}s`);
   if (a.blockedAt) out.push(`reached the stepped fire exit in the ${a.blockedAt} and could not use it`);
+  if (a.misplaced) out.push(`the warden directed them as if they were in the ${a.misplaced.said}, but they were in the ${a.misplaced.was}`);
   if (a.persona.hearingDelay >= 5 && a.heard.length) out.push(`heard announcements ${a.persona.hearingDelay}s late`);
   return out;
 }
@@ -1210,6 +1234,7 @@ export function playReplay(replay: Replay) {
     noticedAt: 0,
     missedOrders: 0,
     blockedAt: null,
+    misplaced: null,
     endedAt: null,
     exit: null,
     history: [],
