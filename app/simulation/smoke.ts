@@ -33,6 +33,10 @@ export const SMOKE_PROFILES: Record<RoomId, SmokeProfile> = {
   atrium: { startSeconds: 30, riseSeconds: 80, peakIntensity: 0.4 },
   library: { startSeconds: 22, riseSeconds: 64, peakIntensity: 0.6 },
   cafe: { startSeconds: 36, riseSeconds: 70, peakIntensity: 0.45 },
+  ncorr: { startSeconds: 48, riseSeconds: 70, peakIntensity: 0.35 },
+  lecture: { startSeconds: Infinity, riseSeconds: 1, peakIntensity: 0 },
+  complab: { startSeconds: Infinity, riseSeconds: 1, peakIntensity: 0 },
+  gym: { startSeconds: Infinity, riseSeconds: 1, peakIntensity: 0 },
 };
 
 /** The logical east route is represented physically by the east passage. */

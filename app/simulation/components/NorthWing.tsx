@@ -44,7 +44,7 @@ function EvacueeOnly({ children }: { children: ReactNode }) {
 }
 
 /** A fire-exit doorway in an outer wall: push bar frame, green running-man sign. Local +Z faces in. */
-function FireExit({ position, rotationY }: { position: Vec3; rotationY: number }) {
+export function FireExit({ position, rotationY }: { position: Vec3; rotationY: number }) {
   return (
     <group position={position} rotation={[0, rotationY, 0]}>
       {[-0.95, 0.95].map((x) => (

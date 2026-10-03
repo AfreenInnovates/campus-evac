@@ -12,7 +12,11 @@ export type RoomId =
   | "annex"
   | "atrium"
   | "library"
-  | "cafe";
+  | "cafe"
+  | "ncorr"
+  | "lecture"
+  | "complab"
+  | "gym";
 
 export type EquipmentId = "access-card" | "emergency-guide";
 export type ScenarioObjectId =
@@ -65,6 +69,10 @@ export const ATRIUM_H = 7.6;
 /** Where the two fire exits sit along the west and east outer walls. */
 export const WEST_EXIT_Z = -8.6;
 export const EAST_EXIT_Z = -16.5;
+/** The north wing, behind the Main Hall: a corridor, three big rooms, and a fire exit out of the Sports Hall. */
+export const NORTH_EXIT_X = 14;
+export const NORTH_Z = -43;
+export const NCORR_Z = -29;
 
 /**
  * The renderer retains the compact block foundation while the labels and
@@ -171,6 +179,43 @@ export const ROOMS: RoomDef[] = [
     floor: "#565a5c",
     cam: { pos: [4, 22, -8], target: [15, 0.6, -17.5] },
   },
+  {
+    id: "ncorr",
+    name: "North Wing / North Corridor",
+    blurb: "Long corridor behind the Main Hall linking the north wing.",
+    bounds: { minX: -22, maxX: 22, minZ: -29, maxZ: -25 },
+    fog: true,
+    floor: "#6e6a63",
+    cam: { pos: [0, 18, -14], target: [0, 0.6, -27] },
+  },
+  {
+    id: "lecture",
+    name: "North Wing / Lecture Theatre",
+    blurb: "Rows of seating facing a projection wall.",
+    bounds: { minX: -22, maxX: -6, minZ: -43, maxZ: -29 },
+    fog: true,
+    floor: "#4f3f4a",
+    cam: { pos: [-14, 22, -20], target: [-14, 0.6, -36] },
+  },
+  {
+    id: "complab",
+    name: "North Wing / Computer Lab",
+    blurb: "Benches of workstations and a server cabinet.",
+    bounds: { minX: -6, maxX: 6, minZ: -43, maxZ: -29 },
+    fog: true,
+    floor: "#5f6670",
+    cam: { pos: [0, 22, -20], target: [0, 0.6, -36] },
+  },
+  {
+    id: "gym",
+    name: "North Wing / Sports Hall",
+    blurb: "Open sprung-floor court with a fire exit to the north field.",
+    bounds: { minX: 6, maxX: 22, minZ: -43, maxZ: -29 },
+    fog: true,
+    floor: "#9a7148",
+    cam: { pos: [14, 22, -20], target: [14, 0.6, -36] },
+    height: 5.2,
+  },
 ];
 
 export const roomHeight = (id: RoomId) => roomById(id).height ?? ROOM_H;
@@ -269,8 +314,8 @@ export const WALLS: WallDef[] = [
     color: OUT,
     openings: [{ at: EAST_EXIT_Z, width: 1.8, height: 2.5 }],
   },
-  { id: "w-far-north-w", axis: "x", fixed: -25, from: -22.15, to: -8, color: OUT },
-  { id: "w-far-north-e", axis: "x", fixed: -25, from: 8, to: 22.15, color: OUT },
+  { id: "w-far-north-w", axis: "x", fixed: -25, from: -22.15, to: -8, color: IN },
+  { id: "w-far-north-e", axis: "x", fixed: -25, from: 8, to: 22.15, color: IN, openings: [{ at: 20.6, width: 1.6, height: 2.4 }] },
   {
     id: "w-hall-n",
     axis: "x",
@@ -278,8 +323,38 @@ export const WALLS: WallDef[] = [
     from: -8,
     to: 8,
     height: ATRIUM_H,
-    color: OUT,
+    color: IN,
+    // under the mezzanine, through to the north wing
+    openings: [{ at: -5.5, width: 2.4, height: 2.9 }],
   },
+  /* the north wing */
+  {
+    id: "w-ncorr-n",
+    axis: "x",
+    fixed: NCORR_Z,
+    from: -22.15,
+    to: 22.15,
+    color: IN,
+    openings: [
+      { at: -14, width: 2, height: 2.5 },
+      { at: 0, width: 2, height: 2.5 },
+      { at: 14, width: 2.2, height: 2.6 },
+    ],
+  },
+  { id: "w-nw-west", axis: "z", fixed: -22, from: NORTH_Z - 0.15, to: -25.15, color: OUT },
+  { id: "w-nw-east", axis: "z", fixed: 22, from: NORTH_Z - 0.15, to: -25.15, color: OUT },
+  {
+    id: "w-nw-north",
+    axis: "x",
+    fixed: NORTH_Z,
+    from: -22.15,
+    to: 22.15,
+    height: 5.2,
+    color: OUT,
+    openings: [{ at: NORTH_EXIT_X, width: 1.8, height: 2.5 }],
+  },
+  { id: "w-lecture-e", axis: "z", fixed: -6, from: NORTH_Z, to: NCORR_Z, color: IN },
+  { id: "w-gym-w", axis: "z", fixed: 6, from: NORTH_Z, to: NCORR_Z, height: 5.2, color: IN },
   {
     id: "w-hall-w",
     axis: "z",
@@ -397,6 +472,10 @@ export const SLABS: {
   { id: "library", x1: -22.15, z1: -25.15, x2: -8, z2: -7.15, color: "#8a6a55", ceiling: true },
   { id: "atrium", x1: -8, z1: -25.15, x2: 8, z2: -7.15, color: "#8c8590", ceiling: true, height: ATRIUM_H },
   { id: "cafe", x1: 8, z1: -25.15, x2: 22.15, z2: -10.15, color: "#8f9496", ceiling: true },
+  { id: "ncorr", x1: -22.15, z1: -29, x2: 22.15, z2: -25.15, color: "#cfc3d2", ceiling: true },
+  { id: "lecture", x1: -22.15, z1: NORTH_Z - 0.15, x2: -6, z2: -29, color: "#5e4a57", ceiling: true },
+  { id: "complab", x1: -6, z1: NORTH_Z - 0.15, x2: 6, z2: -29, color: "#a7adb5", ceiling: true },
+  { id: "gym", x1: 6, z1: NORTH_Z - 0.15, x2: 22.15, z2: -29, color: "#b98a5a", ceiling: true, height: 5.2 },
 ];
 
 /* ------------------------------------------------------------------- doors */

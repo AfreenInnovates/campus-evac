@@ -418,6 +418,10 @@ function sectorLabel(sector: RoomId) {
     atrium: "the Main Hall",
     library: "the library",
     cafe: "the cafeteria",
+    ncorr: "the north corridor",
+    lecture: "the lecture theatre",
+    complab: "the computer lab",
+    gym: "the sports hall",
   }[sector];
 }
 

@@ -300,9 +300,9 @@ export default function Exterior() {
         </mesh>
         <CuboidCollider position={[0, -0.25, 6]} args={[110, 0.25, 110]} />
         <CuboidCollider position={[0, 3, 30]} args={[40, 4, 0.5]} />
-        <CuboidCollider position={[0, 3, -32]} args={[40, 4, 0.5]} />
-        <CuboidCollider position={[-32, 3, 0]} args={[0.5, 4, 40]} />
-        <CuboidCollider position={[32, 3, 0]} args={[0.5, 4, 40]} />
+        <CuboidCollider position={[0, 3, -52]} args={[40, 4, 0.5]} />
+        <CuboidCollider position={[-32, 3, -11]} args={[0.5, 4, 41]} />
+        <CuboidCollider position={[32, 3, -11]} args={[0.5, 4, 41]} />
       </RigidBody>
 
       {/* plaza paving and lawns */}

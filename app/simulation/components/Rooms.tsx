@@ -50,6 +50,7 @@ import {
   WallTrim,
   WoodCrate,
 } from "./Furniture";
+import NorthAnnex from "./NorthAnnex";
 import NorthWing from "./NorthWing";
 
 const INK = "#231c2b";
@@ -646,6 +647,7 @@ export default function Rooms() {
       <ChemistryLab />
       <Classroom />
       <NorthWing />
+      <NorthAnnex />
     </>
   );
 }

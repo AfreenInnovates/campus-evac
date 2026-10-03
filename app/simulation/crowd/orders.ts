@@ -25,9 +25,14 @@ export interface Order {
   status: OrderStatus;
 }
 
-const EXIT_NAMES: Record<string, string> = { main: "Main Exit", west: "West Fire Exit", east: "East Fire Exit" };
+const EXIT_NAMES: Record<string, string> = { main: "Main Exit", west: "West Fire Exit", east: "East Fire Exit", north: "North Fire Exit" };
 
+// most specific first: "north corridor" before "corridor", "sports hall" before "hall", "computer lab" before "lab"
 const ROOM_WORDS: [RegExp, RoomId][] = [
+  [/north corridor|north wing/, "ncorr"],
+  [/lecture/, "lecture"],
+  [/computer/, "complab"],
+  [/sports hall|\bgym\b/, "gym"],
   [/corridor/, "lobby"],
   [/main hall|\bhall\b|atrium/, "atrium"],
   [/library/, "library"],
@@ -44,7 +49,7 @@ const ROOM_WORDS: [RegExp, RoomId][] = [
 export function parseTarget(text: string): Target | null {
   const s = text.toLowerCase();
   if (/shelter|stay put|stay where you are|shut the door/.test(s)) return { kind: "shelter", label: "Shelter in place" };
-  for (const exit of ["west", "east", "main"] as const) {
+  for (const exit of ["west", "east", "north", "main"] as const) {
     if (new RegExp(`${exit}\\b[^.]*exit|${exit} fire exit`).test(s)) {
       const link = LINKS.find((l) => l.exit === exit)!;
       return { kind: "exit", link, label: EXIT_NAMES[exit] };

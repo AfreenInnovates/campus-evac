@@ -1,6 +1,6 @@
 "use client";
 
-import type { LabConfig, LogEntry, RunResult } from "./engine";
+import type { LabConfig, LogEntry, Persona, RunResult } from "./engine";
 
 /**
  * Recorded drills.
@@ -16,10 +16,10 @@ export interface ReplayPerson {
   id: number;
   name: string;
   color: string;
-  persona: { kind: string; blurb: string; speed: number; canRun: boolean; hearingDelay: number };
+  persona: Persona;
 }
 
-/** Per person per frame: x, z, heading, status, sheltering, pace, health, lastDecisionAt, thought, order status, order target. */
+/** Per person per frame: x, z, heading, status, sheltering (1, or 2 for frozen in panic), pace, health, lastDecisionAt, thought, order status, order target. */
 export const FIELDS = 11;
 export const STATUS = ["inside", "safe", "down"] as const;
 export const PACE = ["walk", "run", "crawl"] as const;
@@ -89,6 +89,10 @@ export async function listReplays(): Promise<Replay[]> {
 
 export async function replayForDrill(drill: number) {
   return (await listReplays()).find((r) => r.drill === drill) ?? null;
+}
+
+export async function replayById(id: string) {
+  return (await listReplays()).find((r) => r.id === id) ?? null;
 }
 
 export async function clearReplays() {

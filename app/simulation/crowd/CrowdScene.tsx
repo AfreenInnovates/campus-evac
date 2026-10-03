@@ -14,7 +14,8 @@ import { clampDt } from "../runtime";
 import { buildGrid } from "./nav";
 import { lab, step, useLab } from "./engine";
 import { create } from "zustand";
-import { fireSpot, INDOOR, LINKS, placeName, roomCenter, smokeAt } from "./world";
+import { fireSpot, floorHeight, INDOOR, LINKS, placeName, roomCenter, smokeAt, WEST_STEPS } from "./world";
+import Human from "./Human";
 
 /** Which person the spectator camera is riding along with, and whether the map is ready. */
 export const useSpectator = create<{ follow: number | null; navReady: boolean }>(() => ({ follow: null, navReady: false }));
@@ -54,7 +55,6 @@ function NavBuilder() {
 
 function Person({ index }: { index: number }) {
   const group = useRef<THREE.Group>(null);
-  const body = useRef<THREE.Mesh>(null);
   // A string, not the agent object: the snapshot is rebuilt four times a second, and a figure
   // only needs to redraw when its tag actually changes.
   const tag = useLab((s) => {
@@ -70,54 +70,32 @@ function Person({ index }: { index: number }) {
       : 99;
     const fresh = live && thinking(live) && newer < 3 ? live.thought : "";
     const order = a.order && a.status === "inside" ? (a.order.status === "following" || a.order.status === "done" ? "✓" : a.order.status === "ignored" ? "✗" : "") : "";
-    return [a.id, a.color, a.status, a.deciding ? 1 : 0, fresh.slice(0, 90), order].join("\u0001");
+    return [a.id, a.color, a.status, a.deciding ? 1 : 0, fresh.slice(0, 90), order, a.persona.kind, a.persona.icon ?? ""].join("\u0001");
   });
   const follow = useSpectator((s) => s.follow);
-  const bob = useRef(index * 1.7); // out of step with each other
 
   useFrame((_, rawDt) => {
     const live = lab.agents[index];
     const g = group.current;
     if (!live || !g) return;
     const dt = clampDt(rawDt);
-    const moving = !!live.path && live.status === "inside";
-    bob.current += moving ? dt * (live.pace === "run" ? 14 : 8) : 0;
-    g.position.set(live.x, 0, live.z);
+    g.position.set(live.x, floorHeight(live.x, live.z), live.z);
     g.rotation.y += ((((live.heading - g.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI) * Math.min(1, dt * 10));
-    if (body.current) {
-      const crawl = live.pace === "crawl" && live.status === "inside";
-      const down = live.status === "down";
-      body.current.rotation.x = down ? Math.PI / 2 : crawl ? 1.0 : 0;
-      body.current.position.y = down ? 0.2 : crawl ? 0.45 : 0.62 + (moving ? Math.abs(Math.sin(bob.current)) * 0.06 : 0);
-    }
   });
 
   if (!tag) return null;
-  const [idText, color, status, deciding, thought, order] = tag.split("\u0001");
+  const [idText, color, status, deciding, thought, order, kind, icon] = tag.split("\u0001");
   const id = Number(idText);
   const selected = follow === id;
   const tint = status === "down" ? "#5b5560" : color;
   return (
     <group ref={group}>
-      <group ref={body}>
-        <mesh position={[0, 0, 0]}>
-          <capsuleGeometry args={[0.22, 0.62, 4, 10]} />
-          <meshStandardMaterial color={tint} roughness={0.55} />
-        </mesh>
-        <mesh position={[0, 0.62, 0]}>
-          <sphereGeometry args={[0.19, 14, 10]} />
-          <meshStandardMaterial color="#f3d8c2" roughness={0.6} />
-        </mesh>
-        <mesh position={[0, 0.66, 0.16]}>
-          <boxGeometry args={[0.18, 0.05, 0.05]} />
-          <meshStandardMaterial color="#231c2b" />
-        </mesh>
-      </group>
-      <mesh position={[0, 0.03, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-        <ringGeometry args={[0.34, selected ? 0.5 : 0.42, 28]} />
-        <meshBasicMaterial color={selected ? "#ffffff" : tint} transparent opacity={0.85} toneMapped={false} />
+      <Human index={index} id={id} kind={kind} shirt={tint} />
+      <mesh position={[0, 0.025, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+        <ringGeometry args={[selected ? 0.5 : 0.46, selected ? 0.6 : 0.52, 32]} />
+        <meshBasicMaterial color={selected ? "#ffffff" : tint} transparent opacity={selected ? 0.95 : 0.7} toneMapped={false} />
       </mesh>
-      <Html position={[0, 1.55, 0]} center zIndexRange={[9, 0]} style={{ pointerEvents: "none" }}>
+      <Html position={[0, 1.95, 0]} center zIndexRange={[9, 0]} style={{ pointerEvents: "none" }}>
         <div
           style={{
             font: "800 10px/1 var(--font-geist-mono), monospace",
@@ -129,13 +107,14 @@ function Person({ index }: { index: number }) {
             opacity: status === "safe" ? 0.55 : 1,
           }}
         >
+          {icon && <span style={{ marginRight: 3 }}>{icon}</span>}
           {id}
           {deciding === "1" ? " …" : ""}
           {order && <span style={{ marginLeft: 3, color: order === "✓" ? "#065f46" : "#991b1b" }}>{order}</span>}
         </div>
       </Html>
       {thought && (
-        <Html position={[0, 2.2, 0]} center zIndexRange={[8, 0]} style={{ pointerEvents: "none" }}>
+        <Html position={[0, 2.6, 0]} center zIndexRange={[8, 0]} style={{ pointerEvents: "none" }}>
           <div className="hud-rise" style={{ width: 150, font: "italic 600 10.5px/1.25 var(--font-geist-sans), sans-serif", color: "#16111e", background: "#fffaf3", border: "2px solid #16111e", padding: "4px 7px", boxShadow: "2px 2px 0 #16111e" }}>
             “{thought}”
           </div>
@@ -189,6 +168,36 @@ function People() {
         <Person key={i} index={i} />
       ))}
     </>
+  );
+}
+
+/** The landing and steps outside the west fire exit: the one way out a wheelchair cannot take. */
+function WestSteps() {
+  const s = WEST_STEPS;
+  const concrete = useMemo(() => new THREE.MeshStandardMaterial({ color: "#a59f97", roughness: 0.92 }), []);
+  const nosing = useMemo(() => new THREE.MeshBasicMaterial({ color: "#facc15", toneMapped: false }), []);
+  const blocks = [
+    { from: 0, to: s.landing, h: s.rise * s.count },
+    ...Array.from({ length: s.count - 1 }, (_, k) => ({ from: s.landing + k * s.tread, to: s.landing + (k + 1) * s.tread, h: s.rise * (s.count - k - 1) })),
+  ];
+  return (
+    <group>
+      {blocks.map((b, i) => (
+        <group key={i}>
+          <mesh material={concrete} position={[s.fromX - (b.from + b.to) / 2, b.h / 2, s.z]} receiveShadow>
+            <boxGeometry args={[b.to - b.from, b.h, s.halfWidth * 2]} />
+          </mesh>
+          <mesh material={nosing} position={[s.fromX - b.to + 0.03, b.h + 0.003, s.z]}>
+            <boxGeometry args={[0.06, 0.006, s.halfWidth * 2]} />
+          </mesh>
+        </group>
+      ))}
+      <Html position={[s.fromX - 1, 1.3, s.z]} center zIndexRange={[5, 0]} style={{ pointerEvents: "none" }}>
+        <div style={{ font: "800 9px/1.2 var(--font-geist-sans), sans-serif", background: "rgba(22,17,30,0.8)", color: "#facc15", padding: "2px 6px", whiteSpace: "nowrap" }}>
+          Steps · no wheelchair access
+        </div>
+      </Html>
+    </group>
   );
 }
 
@@ -270,7 +279,7 @@ function SmokeHaze() {
 
 /* ------------------------------------------------------------------ the warden's camera */
 
-const CAM = { minX: -27, maxX: 27, minZ: -27.5, maxZ: 19.5 };
+const CAM = { minX: -27, maxX: 27, minZ: -47, maxZ: 19.5 };
 const SHOT_W = 1024;
 const SHOT_H = Math.round((SHOT_W * (CAM.maxZ - CAM.minZ)) / (CAM.maxX - CAM.minX));
 
@@ -383,14 +392,28 @@ function CCTV() {
 
 function Spectator() {
   const controls = useRef<React.ComponentRef<typeof OrbitControls>>(null);
-  const goal = useMemo(() => new THREE.Vector3(0, 0, -6), []);
+  const goal = useMemo(() => new THREE.Vector3(0, 0, -15), []);
+  const eye = useMemo(() => new THREE.Vector3(), []);
+  // when you pick someone, the camera swoops down behind their shoulder, then rides along
+  const glide = useRef({ id: null as number | null, left: 0 });
   useFrame((_, rawDt) => {
     const follow = useSpectator.getState().follow;
     const agent = follow ? lab.agents.find((a) => a.id === follow) : null;
     const c = controls.current;
+    const dt = clampDt(rawDt);
+    if (follow !== glide.current.id) glide.current = { id: follow, left: agent ? 1.6 : 0 };
     if (!c || !agent) return;
-    goal.set(agent.x, 0.8, agent.z);
-    const k = Math.min(1, clampDt(rawDt) * 3);
+    goal.set(agent.x, 0.9, agent.z);
+    if (glide.current.left > 0) {
+      glide.current.left -= dt;
+      const k = Math.min(1, dt * 3.2);
+      eye.set(agent.x - Math.sin(agent.heading) * 6, 4.2, agent.z - Math.cos(agent.heading) * 6);
+      c.target.lerp(goal, k);
+      c.object.position.lerp(eye, k);
+      c.update();
+      return;
+    }
+    const k = Math.min(1, dt * 3);
     const shift = goal.clone().sub(c.target).multiplyScalar(k);
     c.target.add(shift);
     c.object.position.add(shift);
@@ -400,10 +423,10 @@ function Spectator() {
     <OrbitControls
       ref={controls}
       makeDefault
-      target={[0, 0, -6]}
+      target={[0, 0, -15]}
       maxPolarAngle={1.35}
       minDistance={6}
-      maxDistance={80}
+      maxDistance={110}
       enableDamping
       dampingFactor={0.08}
     />
@@ -442,7 +465,7 @@ export default memo(function CrowdScene() {
     <Canvas
       shadows="percentage"
       dpr={typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches ? 1 : [1, 1.5]}
-      camera={{ position: [0, 44, 30], fov: 45, near: 0.5, far: 400 }}
+      camera={{ position: [0, 58, 30], fov: 45, near: 0.5, far: 400 }}
       gl={{ antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: false }}
       style={{ position: "absolute", inset: 0 }}
     >
@@ -454,11 +477,11 @@ export default memo(function CrowdScene() {
           position={[SUN.x * 45, SUN.y * 45 + 30, SUN.z * 45]}
           intensity={1.8}
           color="#ffc9a0"
-          shadow-mapSize={[1024, 1024]}
-          shadow-camera-left={-34}
-          shadow-camera-right={34}
-          shadow-camera-top={34}
-          shadow-camera-bottom={-34}
+          shadow-mapSize={[2048, 2048]}
+          shadow-camera-left={-50}
+          shadow-camera-right={50}
+          shadow-camera-top={50}
+          shadow-camera-bottom={-50}
           shadow-camera-far={160}
           shadow-bias={-0.0004}
         />
@@ -470,6 +493,7 @@ export default memo(function CrowdScene() {
         </Physics>
         <StaticShadows />
         <People />
+        <WestSteps />
         <Signposts />
         <Fire />
         <SmokeHaze />

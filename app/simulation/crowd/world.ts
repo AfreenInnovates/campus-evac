@@ -1,4 +1,4 @@
-import { EAST_EXIT_Z, roomAt, roomById, WEST_EXIT_Z, type RoomId } from "../level";
+import { EAST_EXIT_Z, NCORR_Z, NORTH_EXIT_X, NORTH_Z, roomAt, roomById, WEST_EXIT_Z, type RoomId } from "../level";
 
 /**
  * The building as the crowd experiences it: rooms joined by doorways, three ways out, and a
@@ -20,7 +20,9 @@ export interface Link {
   pb: P2;
   /** what the signage over this doorway says, as a person would read it */
   sign: { fromA: string; fromB: string };
-  exit?: "main" | "west" | "east";
+  exit?: "main" | "west" | "east" | "north";
+  /** steps on the far side: no way through for a wheelchair */
+  steps?: boolean;
 }
 
 export const LINKS: Link[] = [
@@ -34,12 +36,19 @@ export const LINKS: Link[] = [
   { id: "lobby-atrium", a: "lobby", b: "atrium", door: [0, -7], pa: [0, -5.6], pb: [0, -8.6], sign: { fromA: "MAIN HALL / LIBRARY / CAFETERIA", fromB: "central corridor, main entrance beyond" } },
   { id: "atrium-library", a: "atrium", b: "library", door: [-8, -16], pa: [-6.6, -16], pb: [-9.6, -16], sign: { fromA: "LIBRARY", fromB: "MAIN HALL" } },
   { id: "atrium-cafe", a: "atrium", b: "cafe", door: [8, -17.5], pa: [6.6, -17.5], pb: [9.6, -17.5], sign: { fromA: "CAFETERIA", fromB: "MAIN HALL" } },
-  { id: "west-exit", a: "library", b: "outside", door: [-22, WEST_EXIT_Z], pa: [-20.6, WEST_EXIT_Z], pb: [-26.5, WEST_EXIT_Z], exit: "west", sign: { fromA: "FIRE EXIT (west), green running-man sign", fromB: "library" } },
+  { id: "west-exit", a: "library", b: "outside", door: [-22, WEST_EXIT_Z], pa: [-20.6, WEST_EXIT_Z], pb: [-26.5, WEST_EXIT_Z], exit: "west", steps: true, sign: { fromA: "FIRE EXIT (west), green running-man sign, steps down outside", fromB: "library" } },
   { id: "east-exit", a: "cafe", b: "outside", door: [22, EAST_EXIT_Z], pa: [20.6, EAST_EXIT_Z], pb: [26.5, EAST_EXIT_Z], exit: "east", sign: { fromA: "FIRE EXIT (east), green running-man sign", fromB: "cafeteria" } },
+  /* the north wing */
+  { id: "atrium-ncorr", a: "atrium", b: "ncorr", door: [-5.5, -25], pa: [-5.5, -23.4], pb: [-5.5, -27], sign: { fromA: "NORTH WING: Lecture Theatre, Computer Lab, Sports Hall", fromB: "MAIN HALL, main entrance beyond" } },
+  { id: "cafe-ncorr", a: "cafe", b: "ncorr", door: [20.6, -25], pa: [20.6, -23.4], pb: [20.6, -27], sign: { fromA: "NORTH WING corridor", fromB: "CAFETERIA, east fire exit beyond" } },
+  { id: "ncorr-lecture", a: "ncorr", b: "lecture", door: [-14, NCORR_Z], pa: [-14, -27], pb: [-14, -30.6], sign: { fromA: "LECTURE THEATRE", fromB: "north corridor" } },
+  { id: "ncorr-complab", a: "ncorr", b: "complab", door: [0, NCORR_Z], pa: [0, -27], pb: [0, -30.6], sign: { fromA: "COMPUTER LAB", fromB: "north corridor" } },
+  { id: "ncorr-gym", a: "ncorr", b: "gym", door: [14, NCORR_Z], pa: [14, -27], pb: [14, -30.6], sign: { fromA: "SPORTS HALL, fire exit beyond", fromB: "north corridor, Main Hall beyond" } },
+  { id: "north-exit", a: "gym", b: "outside", door: [NORTH_EXIT_X, NORTH_Z], pa: [NORTH_EXIT_X, NORTH_Z + 1.4], pb: [NORTH_EXIT_X, NORTH_Z - 4], exit: "north", sign: { fromA: "FIRE EXIT (north) to the sports field, green running-man sign", fromB: "sports hall" } },
 ];
 
 /** Rooms people can start in, and where the fire can start. */
-export const INDOOR: RoomId[] = ["entry", "lobby", "wcorr", "ecorr", "sec", "vault", "annex", "atrium", "library", "cafe"];
+export const INDOOR: RoomId[] = ["entry", "lobby", "wcorr", "ecorr", "sec", "vault", "annex", "atrium", "library", "cafe", "ncorr", "lecture", "complab", "gym"];
 
 export const placeName = (room: RoomId) => (room === "outside" ? "outside" : roomById(room).name.split(" / ").pop()!);
 
@@ -66,7 +75,20 @@ export function roomCenter(room: RoomId): P2 {
 
 /** Clear of the building, far enough from the doors to count as out. */
 export function isSafe(x: number, z: number) {
-  return roomAt(x, z) === "outside" && (z > 12.5 || x < -23.5 || x > 23.5 || z < -26.5);
+  return roomAt(x, z) === "outside" && (z > 12.5 || x < -23.5 || x > 23.5 || z < NORTH_Z - 2);
+}
+
+/** The west fire exit opens onto a landing and three steps down to the lawn. */
+export const WEST_STEPS = { fromX: -22.1, landing: 0.6, tread: 0.42, rise: 0.15, count: 3, halfWidth: 1.1, z: WEST_EXIT_Z };
+
+/** How high the ground is under a point: zero everywhere except the west exit's steps. */
+export function floorHeight(x: number, z: number) {
+  const s = WEST_STEPS;
+  if (Math.abs(z - s.z) > s.halfWidth || x > s.fromX) return 0;
+  const along = s.fromX - x;
+  if (along < s.landing) return s.rise * s.count;
+  const step = Math.floor((along - s.landing) / s.tread) + 1;
+  return Math.max(0, s.rise * (s.count - step));
 }
 
 /* ------------------------------------------------------------------ the fire */
@@ -83,7 +105,10 @@ export const SCENARIOS: Scenario[] = [
   { id: "corridor", label: "Electrical fire in the Central Corridor", origin: "lobby", blurb: "The main route to the main exit fills first." },
   { id: "lab-gas", label: "Gas fire in Chemistry Lab 1A", origin: "sec", blurb: "Smoke pushes into the corridor from the west." },
   { id: "library", label: "Fire in the Library stacks", origin: "library", blurb: "The west fire exit is inside the fire room." },
-  { id: "hall", label: "Fire in the Main Hall", origin: "atrium", blurb: "Cuts the north wing off from the corridor." },
+  { id: "hall", label: "Fire in the Main Hall", origin: "atrium", blurb: "Cuts the north wing off from the main entrance." },
+  { id: "lecture", label: "Fire in the Lecture Theatre", origin: "lecture", blurb: "Smoke fills the north corridor that the whole wing depends on." },
+  { id: "complab", label: "Electrical fire in the Computer Lab", origin: "complab", blurb: "Starts in the middle of the north wing." },
+  { id: "gym", label: "Fire in the Sports Hall store", origin: "gym", blurb: "The north fire exit is inside the fire room." },
 ];
 
 /** Doorway hops from the fire, through indoor rooms only. */
@@ -128,6 +153,9 @@ export function fireSpot(origin: RoomId): P2 {
     sec: [-19.5, -4.4],
     library: [-17.2, -21],
     atrium: [4.5, -21.5],
+    lecture: [-19, -40],
+    complab: [3.5, -40.5],
+    gym: [19.5, -40.5],
   };
   return spots[origin] ?? roomCenter(origin);
 }

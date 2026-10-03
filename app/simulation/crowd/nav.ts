@@ -11,7 +11,7 @@ import type { P2 } from "./world";
 export const CELL = 0.4;
 const MIN_X = -31;
 const MAX_X = 31;
-const MIN_Z = -31;
+const MIN_Z = -51;
 const MAX_Z = 29;
 export const COLS = Math.round((MAX_X - MIN_X) / CELL);
 export const ROWS = Math.round((MAX_Z - MIN_Z) / CELL);

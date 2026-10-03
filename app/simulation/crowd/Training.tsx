@@ -17,7 +17,8 @@ import { SCENARIOS } from "./world";
 
 export interface QueueItem {
   config: LabConfig;
-  tag: PointTag;
+  /** "audit": one fire of a building audit, recorded for the audit report, not the learning curve */
+  tag: PointTag | "audit";
   learn: boolean;
 }
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import { roomAt, type RoomId } from "../level";
+import { roomAt, roomById, type RoomId } from "../level";
 import { cellOf, findPath, walkable, type NavGrid } from "./nav";
 import { costOf, type CrowdTask } from "./prompts";
 import { adoptRules, nextDrillNumber, standingOrders, usePlaybook } from "./playbook";
@@ -12,6 +12,7 @@ import {
   farPoint,
   fireSpot,
   hopsFrom,
+  INDOOR,
   isSafe,
   LINKS,
   linksOf,
@@ -42,23 +43,96 @@ export type Pace = "walk" | "run" | "crawl";
 export type Status = "inside" | "safe" | "down";
 export type WardenMode = "ai" | "human" | "none";
 
-interface Persona {
+export interface Persona {
   kind: string;
+  /** how the person is described on screen */
+  label?: string;
+  icon?: string;
   blurb: string;
   speed: number;
   canRun: boolean;
   /** seconds before an announcement registers */
   hearingDelay: number;
+  /** can get down on hands and knees under the smoke */
+  canCrawl?: boolean;
+  /** hears neither the alarm nor the PA: only sees what others do, and orders passed on in person */
+  deaf?: boolean;
+  /** freezes when the alarm goes and again when things get worse */
+  panics?: boolean;
+  /** needs a route with no steps */
+  stepFree?: boolean;
 }
 
-const PERSONAS: Persona[] = [
-  { kind: "calm", blurb: "calm first-year student who follows official instructions carefully", speed: 1, canRun: true, hearingDelay: 0 },
-  { kind: "anxious", blurb: "anxious student who tends to follow whatever other people are doing", speed: 1.05, canRun: true, hearingDelay: 0 },
-  { kind: "sceptic", blurb: "lecturer who trusts what they can see over announcements", speed: 0.95, canRun: true, hearingDelay: 0 },
-  { kind: "wheelchair", blurb: "student who uses a wheelchair and cannot run", speed: 0.75, canRun: false, hearingDelay: 0 },
-  { kind: "visitor", blurb: "visitor on their first day who has never been in this building", speed: 1, canRun: true, hearingDelay: 0 },
-  { kind: "headphones", blurb: "student wearing headphones who notices announcements late", speed: 1, canRun: true, hearingDelay: 7 },
-];
+const PERSONA: Record<string, Persona> = {
+  calm: { kind: "calm", label: "calm student", icon: "🙂", blurb: "calm first-year student who follows official instructions carefully", speed: 1, canRun: true, hearingDelay: 0 },
+  anxious: { kind: "anxious", label: "follows the crowd", icon: "👥", blurb: "anxious student who tends to follow whatever other people are doing", speed: 1.05, canRun: true, hearingDelay: 0 },
+  sceptic: { kind: "sceptic", label: "lecturer", icon: "🧐", blurb: "lecturer who trusts what they can see over announcements", speed: 0.95, canRun: true, hearingDelay: 0 },
+  wheelchair: {
+    kind: "wheelchair",
+    label: "wheelchair user",
+    icon: "♿",
+    blurb: "student who uses a manual wheelchair: you cannot run, cannot get down to crawl, and cannot go down steps",
+    speed: 0.7,
+    canRun: false,
+    canCrawl: false,
+    stepFree: true,
+    hearingDelay: 0,
+  },
+  deaf: {
+    kind: "deaf",
+    label: "deaf",
+    icon: "🧏",
+    blurb: "deaf student: you hear neither the fire alarm nor announcements, so you rely on what you see and on people around you",
+    speed: 1,
+    canRun: true,
+    deaf: true,
+    hearingDelay: 0,
+  },
+  panic: {
+    kind: "panic",
+    label: "panics",
+    icon: "😰",
+    blurb: "student who panics in emergencies: your mind goes blank, you freeze, and you copy whoever is nearest",
+    speed: 1.1,
+    canRun: true,
+    panics: true,
+    hearingDelay: 0,
+  },
+  elderly: {
+    kind: "elderly",
+    label: "elderly, walks with a cane",
+    icon: "🦯",
+    blurb: "elderly visiting professor who walks with a cane: you cannot run or get down onto the floor",
+    speed: 0.6,
+    canRun: false,
+    canCrawl: false,
+    hearingDelay: 2,
+  },
+  visitor: { kind: "visitor", label: "first-time visitor", icon: "🧭", blurb: "visitor on their first day who has never been in this building", speed: 1, canRun: true, hearingDelay: 0 },
+  headphones: { kind: "headphones", label: "wearing headphones", icon: "🎧", blurb: "student wearing noise-cancelling headphones who notices announcements late", speed: 1, canRun: true, hearingDelay: 7 },
+};
+
+/** The people real evacuation plans most often fail, so every drill includes some of them. */
+const AT_RISK = ["wheelchair", "deaf", "panic", "elderly", "visitor", "headphones"];
+const EVERYONE_ELSE = ["calm", "anxious", "sceptic", "calm", "anxious"];
+
+function castPeople(count: number, random: () => number): Persona[] {
+  const kinds = AT_RISK.slice(0, Math.min(AT_RISK.length, Math.ceil(count / 2)));
+  while (kinds.length < count) kinds.push(EVERYONE_ELSE[Math.floor(random() * EVERYONE_ELSE.length)]);
+  for (let i = kinds.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1));
+    [kinds[i], kinds[j]] = [kinds[j], kinds[i]];
+  }
+  return kinds.map((kind) => PERSONA[kind]);
+}
+
+/** What the warden's records say about a person, the way a real Personal Emergency Evacuation Plan would. */
+export function needsOf(persona: Persona) {
+  if (persona.stepFree) return "wheelchair user: needs a step-free route; cannot use the WEST FIRE EXIT (steps)";
+  if (persona.deaf) return "deaf: cannot hear the alarm or the PA; an order only reaches them if someone in the same room passes it on";
+  if (persona.kind === "elderly") return "elderly, walks with a cane: slow, cannot crawl";
+  return "";
+}
 
 const NAMES = ["Asha", "Ben", "Chen", "Dara", "Eli", "Fatima", "Gus", "Hana", "Ivan", "Jia", "Kofi", "Lena", "Mateo", "Nia", "Omar", "Priya", "Quinn", "Rosa", "Sam", "Tariq"];
 const COLORS = ["#ff6a3d", "#38bdf8", "#facc15", "#a78bfa", "#34d399", "#f472b6", "#fb923c", "#60a5fa", "#e879f9", "#4ade80", "#fbbf24", "#22d3ee", "#f87171", "#c084fc", "#2dd4bf", "#fda4af", "#93c5fd", "#bef264", "#fdba74", "#67e8f9"];
@@ -103,6 +177,15 @@ export interface Agent {
   sheltering: boolean;
   /** the warden's latest order to this person by name, and whether they are following it */
   order: Order | null;
+  /** frozen in panic until this time */
+  frozenUntil: number;
+  frozenFor: number;
+  /** when a deaf person realised something was wrong; null until they do */
+  noticedAt: number | null;
+  /** orders meant for this person that never reached them */
+  missedOrders: number;
+  /** where they reached a fire exit they could not use */
+  blockedAt: string | null;
   endedAt: number | null;
   exit: string | null;
   history: { t: number; room: string; choice: string; thought: string }[];
@@ -216,7 +299,7 @@ function recordFrame() {
       Math.round(a.z * 100) / 100,
       Math.round(a.heading * 100) / 100,
       STATUS.indexOf(a.status),
-      a.sheltering ? 1 : 0,
+      a.sheltering ? 1 : a.frozenUntil > lab.t ? 2 : 0,
       PACE.indexOf(a.pace),
       Math.round(a.health),
       Math.round(a.lastDecisionAt * 10) / 10,
@@ -239,7 +322,21 @@ function rng(seed: number) {
   };
 }
 
-const SPAWN_ROOMS: RoomId[] = ["library", "cafe", "atrium", "sec", "vault", "lobby", "library", "cafe", "atrium", "sec"];
+/** Where people can be when the alarm goes: anywhere indoors, more of them in the bigger rooms. */
+const SPAWN_ROOMS = INDOOR.filter((room) => room !== "entry").map((room) => {
+  const b = roomById(room).bounds;
+  return { room, area: (b.maxX - b.minX) * (b.maxZ - b.minZ) };
+});
+const SPAWN_AREA = SPAWN_ROOMS.reduce((sum, r) => sum + r.area, 0);
+
+function spawnRoom(random: () => number): RoomId {
+  let pick = random() * SPAWN_AREA;
+  for (const r of SPAWN_ROOMS) {
+    pick -= r.area;
+    if (pick <= 0) return r.room;
+  }
+  return SPAWN_ROOMS[0].room;
+}
 
 export function setupRun(config: LabConfig) {
   const scenario = SCENARIOS.find((item) => item.id === config.scenarioId) ?? SCENARIOS[0];
@@ -268,15 +365,17 @@ export function setupRun(config: LabConfig) {
   lab.ruleCount = useOrders ? playbook.rules.length : 0;
 
   const grid = lab.grid;
+  const cast = castPeople(config.agents, random);
   for (let i = 0; i < config.agents; i++) {
-    const room = SPAWN_ROOMS[i % SPAWN_ROOMS.length];
+    const room = spawnRoom(random);
     const [cx, cz] = roomCenter(room);
+    const b = roomById(room).bounds;
     let x = cx;
     let z = cz;
-    // scatter within the room onto free floor
-    for (let attempt = 0; attempt < 40; attempt++) {
-      const px = cx + (random() - 0.5) * 9;
-      const pz = cz + (random() - 0.5) * 9;
+    // anywhere in the room on free floor, clear of the walls and of each other
+    for (let attempt = 0; attempt < 60; attempt++) {
+      const px = b.minX + 0.7 + random() * (b.maxX - b.minX - 1.4);
+      const pz = b.minZ + 0.7 + random() * (b.maxZ - b.minZ - 1.4);
       if (roomAt(px, pz) !== room) continue;
       if (grid && !walkable(grid, ...cellOf(px, pz))) continue;
       if (lab.agents.some((other) => Math.hypot(other.x - px, other.z - pz) < 0.9)) continue;
@@ -284,7 +383,7 @@ export function setupRun(config: LabConfig) {
       z = pz;
       break;
     }
-    const persona = PERSONAS[Math.floor(random() * PERSONAS.length)];
+    const persona = cast[i];
     lab.agents.push({
       id: i + 1,
       name: NAMES[i % NAMES.length],
@@ -306,13 +405,19 @@ export function setupRun(config: LabConfig) {
       deciding: false,
       decisions: 0,
       lastDecisionAt: -99,
-      wants: "the fire alarm just went off",
+      // a deaf person does not know anything is wrong until they see it
+      wants: persona.deaf ? null : "the fire alarm just went off",
       heard: [],
       pendingHear: [],
       visited: [room],
       smokeSeen: 0,
       sheltering: false,
       order: null,
+      frozenUntil: persona.panics ? 4 + random() * 5 : 0,
+      frozenFor: 0,
+      noticedAt: persona.deaf ? null : 0,
+      missedOrders: 0,
+      blockedAt: null,
       endedAt: null,
       exit: null,
       history: [],
@@ -374,7 +479,11 @@ function perceive(agent: Agent) {
   const origin = lab.scenario!.origin;
   // in thick smoke you cannot read a sign or see past a doorway: you need someone to tell you
   const blind = smokeHere > 0.45;
-  const options = linksOf(here).map((link, i) => {
+  const persona = agent.persona;
+  // a wheelchair cannot go down steps: that doorway is not an option, only a dead end in view
+  const steps = persona.stepFree ? linksOf(here).filter((link) => link.steps) : [];
+  if (steps.length && !agent.blockedAt) agent.blockedAt = placeName(here);
+  const options = linksOf(here).filter((link) => !steps.includes(link)).map((link, i) => {
     const beyond = otherSide(link, here);
     const beyondSmoke = smokeAt(beyond, t, lab.hops);
     const heading = lab.agents.filter((other) => other !== agent && other.status === "inside" && other.via === link).length;
@@ -391,6 +500,8 @@ function perceive(agent: Agent) {
           : `beyond it: ${smokeWord(beyondSmoke)}${beyond === origin && t > 4 ? ", flames visible through it" : ""}`,
     ];
     if (heading) parts.push(`${heading} ${heading === 1 ? "person is" : "people are"} heading through it`);
+    const been = agent.visited.filter((room) => room === beyond).length;
+    if (been) parts.push(been > 1 ? `you have already been there ${been} times and found no way out` : "you have been there before");
     return { link, text: parts.join(" — ") };
   });
 
@@ -413,7 +524,16 @@ function perceive(agent: Agent) {
       fireLine,
       crowd,
       `Ways out of this room that you can see:\n${options.map((o) => o.text).join("\n")}`,
-      heard.length ? `Announcements you have heard (newest first):\n${heard.join("\n")}` : "You have not heard any announcement yet, only the alarm.",
+      ...steps.map((link) => `There is also a ${link.exit} fire exit here, but it opens onto steps down: impossible in your wheelchair.`),
+      persona.deaf
+        ? heard.length
+          ? `You are deaf. Messages someone passed on to you in person (newest first):\n${heard.join("\n")}`
+          : "You are deaf: you hear nothing at all, no alarm and no announcement, so never say you heard something. You only know what you can see."
+        : heard.length
+          ? `Announcements you have heard (newest first):\n${heard.join("\n")}`
+          : "You have not heard any announcement yet, only the alarm.",
+      persona.panics ? "Your heart is pounding and it is hard to think straight; you badly want to do whatever the people nearest you are doing." : "",
+      persona.canCrawl === false ? "You cannot get down onto the floor to crawl." : "",
       `Rooms you have been in, in order: ${agent.visited.map(placeName).join(" -> ")}.`,
       `Why you are deciding now: ${agent.wants ?? "checking your situation"}.`,
       agent.persona.canRun ? "" : "You cannot run.",
@@ -453,7 +573,7 @@ async function decide(agent: Agent) {
     const shelter = said.startsWith("SHELTER");
     const index = shelter || said.startsWith("WAIT") ? -1 : LETTERS.indexOf(said.charAt(0));
     const option = index >= 0 ? seen.options[index] : null;
-    const pace: Pace = answer.pace === "run" && agent.persona.canRun ? "run" : answer.pace === "crawl" ? "crawl" : "walk";
+    const pace: Pace = answer.pace === "run" && agent.persona.canRun ? "run" : answer.pace === "crawl" && agent.persona.canCrawl !== false ? "crawl" : "walk";
     agent.thought = String(answer.thought ?? "").slice(0, 160) || "…";
     agent.decisions++;
     if (agent.order && agent.order.status !== "done") agent.order.status = judge(agent.order, seen.room, option?.link ?? null, shelter);
@@ -462,7 +582,7 @@ async function decide(agent: Agent) {
       agent.path = null;
       agent.via = null;
       agent.sheltering = true;
-      agent.pace = "crawl";
+      agent.pace = agent.persona.canCrawl === false ? "walk" : "crawl";
       agent.action = `shelters in the ${placeName(agent.room)}`;
     } else if (option && goThrough(agent, option.link)) {
       agent.sheltering = false;
@@ -481,7 +601,7 @@ async function decide(agent: Agent) {
     agent.thought = message === "run budget reached" ? "(budget reached)" : "(could not think: model error)";
     // keep going on instinct: head for the nearest doorway that is not towards the fire
     if (!agent.path) {
-      const escape = linksOf(agent.room).sort((a, b) => smokeAt(otherSide(a, agent.room), lab.t, lab.hops) - smokeAt(otherSide(b, agent.room), lab.t, lab.hops))[0];
+      const escape = linksOf(agent.room).filter((link) => !(agent.persona.stepFree && link.steps)).sort((a, b) => smokeAt(otherSide(a, agent.room), lab.t, lab.hops) - smokeAt(otherSide(b, agent.room), lab.t, lab.hops))[0];
       if (escape) goThrough(agent, escape);
     }
     if (reason) agent.wants = null;
@@ -511,7 +631,7 @@ const PLAN = (() => {
   return [
     "Building plan (single storey). Compass: north is the top of the camera image, south the bottom, west the left, east the right. Evacuees use the same compass words.",
     ...[...rooms.entries()].map(([room, list]) => `- ${placeName(room as RoomId)} connects to: ${list.join("; ")}`),
-    "Exits: MAIN EXIT (south, through the Main Entrance), WEST FIRE EXIT (Library west wall), EAST FIRE EXIT (Cafeteria east wall). The Electrical Service room is a dead end.",
+    "Exits: MAIN EXIT (south, through the Main Entrance, step-free), WEST FIRE EXIT (Library west wall; opens onto steps down, so no wheelchair can use it), EAST FIRE EXIT (Cafeteria east wall, step-free), NORTH FIRE EXIT (Sports Hall north wall, step-free, out to the sports field). The north wing (Lecture Theatre, Computer Lab, Sports Hall) is reached only through the North Corridor, from the Main Hall or the Cafeteria. The Electrical Service room is a dead end.",
   ].join("\n");
 })();
 
@@ -522,6 +642,17 @@ function deliver(text: string, people: number[] | null, kind: "warden" | "human"
     if (agent.status !== "inside") continue;
     const direct = !!people?.includes(agent.id);
     if (people && !direct) continue;
+    if (agent.persona.deaf) {
+      // the PA means nothing to them; an order by name only arrives if someone beside them passes it on
+      if (!direct) continue;
+      const helper = lab.agents.find((other) => other !== agent && other.status === "inside" && !other.persona.deaf && other.room === agent.room);
+      if (!helper) {
+        agent.missedOrders++;
+        continue;
+      }
+      agent.pendingHear.push({ t: lab.t + 5, text: `(${helper.name} taps your shoulder and points, passing on the warden's message) ${clean}`, direct, target });
+      continue;
+    }
     agent.pendingHear.push({ t: lab.t + agent.persona.hearingDelay, text: clean, direct, target: direct ? target : null });
   }
   note(kind, people ? `To #${people.join(", #")}: “${clean}”` : `PA: “${clean}”`, undefined, { type: "announce", text: clean, people });
@@ -556,6 +687,7 @@ async function wardenTurn() {
     const status = [
       `Time since the alarm: ${Math.round(t)}s.`,
       `Roll call - still inside, not yet accounted for: ${inside.length ? inside.map((a) => `#${a.id} ${a.name}`).join(", ") : "nobody"}.`,
+      ...inside.filter((a) => needsOf(a.persona)).map((a) => `Known needs (evacuation plan on file): #${a.id} ${a.name} - ${needsOf(a.persona)}.`),
       `Already out and safe (give them no more orders): ${out.length ? out.map((a) => `#${a.id}`).join(", ") : "nobody yet"}.`,
       unordered.length ? `Still inside with no personal order from you yet: ${unordered.map((a) => `#${a.id}`).join(", ")}.` : "",
     ]
@@ -623,10 +755,25 @@ export function step(dt: number) {
       agent.heard.push({ ...heard, t });
       if (heard.direct && heard.target) agent.order = { t, message: heard.text, target: heard.target, status: "heard" };
       agent.wants = heard.direct ? "the warden just spoke to you by name" : "a new announcement just played";
+      // a calm voice saying your own name is what cuts through panic
+      if (heard.direct && agent.frozenUntil > t) agent.frozenUntil = t;
+      if (agent.noticedAt === null) agent.noticedAt = t;
     }
 
+    // a deaf person only realises when they see people hurrying out, or smell the smoke
+    if (agent.noticedAt === null) {
+      const rushing = lab.agents.some((other) => other !== agent && other.status === "inside" && other.room === agent.room && other.path && other.via);
+      if (rushing || smokeAt(agent.room, t, lab.hops) > 0.08) {
+        agent.noticedAt = t;
+        agent.wants = rushing ? "everyone around you has suddenly started hurrying out, and you do not know why" : "you smell smoke";
+      }
+    }
+
+    const frozen = agent.frozenUntil > t;
+    if (frozen) agent.frozenFor += dt;
+
     // walk the current path
-    if (agent.path && agent.leg < agent.path.length) {
+    if (!frozen && agent.path && agent.leg < agent.path.length) {
       const [tx, tz] = agent.path[agent.leg];
       const dx = tx - agent.x;
       const dz = tz - agent.z;
@@ -669,7 +816,7 @@ export function step(dt: number) {
       agent.status = "safe";
       agent.endedAt = t;
       if (agent.order && agent.order.target.kind === "exit" && agent.order.target.link === agent.via) agent.order.status = "done";
-      agent.exit = agent.via?.exit ?? (agent.z > 12 ? "main" : agent.x < 0 ? "west" : "east");
+      agent.exit = agent.via?.exit ?? (agent.z > 12 ? "main" : agent.z < -40 ? "north" : agent.x < 0 ? "west" : "east");
       agent.action = `safe via the ${agent.exit} exit`;
       note("system", `${agent.name} (#${agent.id}) is out, ${Math.round(t)}s, via the ${agent.exit} exit.`, agent.id, {
         type: "out",
@@ -682,7 +829,7 @@ export function step(dt: number) {
     // outside the walls but not yet clear: keep walking to the nearest exit's safe point
     if (room === "outside") {
       if (!agent.path) {
-        const exits = LINKS.filter((link) => link.exit);
+        const exits = LINKS.filter((link) => link.exit && !(agent.persona.stepFree && link.steps));
         const exit = agent.via?.exit ? agent.via : exits.sort((a, b) => Math.hypot(a.pb[0] - agent.x, a.pb[1] - agent.z) - Math.hypot(b.pb[0] - agent.x, b.pb[1] - agent.z))[0];
         agent.path = (lab.grid && findPath(lab.grid, [agent.x, agent.z], exit.pb)) || [exit.pb];
         agent.leg = 0;
@@ -709,14 +856,16 @@ export function step(dt: number) {
     if (bucket > agent.smokeSeen) {
       agent.smokeSeen = bucket;
       if (!agent.sheltering) agent.wants ??= "the smoke around you is getting worse";
+      // thicker smoke can tip a panicking person back into freezing, unless someone has taken charge of them
+      if (agent.persona.panics && bucket >= 2 && !agent.order) agent.frozenUntil = Math.max(agent.frozenUntil, t + 4);
     }
-    if (!agent.path && !agent.wants && !agent.sheltering && t - agent.lastDecisionAt > WAIT_RETHINK) agent.wants = "you have been standing still for a while";
+    if (agent.noticedAt !== null && !agent.path && !agent.wants && !agent.sheltering && t - agent.lastDecisionAt > WAIT_RETHINK) agent.wants = "you have been standing still for a while";
   }
 
   // think, a few people at a time; whoever has waited longest goes first
   if (lab.usage.cost < RUN_BUDGET_USD) {
     const ready = lab.agents
-      .filter((agent) => agent.status === "inside" && agent.wants && !agent.deciding && agent.room !== "outside")
+      .filter((agent) => agent.status === "inside" && agent.wants && !agent.deciding && agent.room !== "outside" && agent.frozenUntil <= t)
       .sort((a, b) => a.lastDecisionAt - b.lastDecisionAt);
     for (const agent of ready) {
       if (lab.inFlight >= MAX_IN_FLIGHT) break;
@@ -799,6 +948,122 @@ export function summarise(): RunResult | null {
   };
 }
 
+/** What went wrong for one person, in plain words, from what the simulation actually recorded. */
+function troubleOf(a: Agent): string[] {
+  const out: string[] = [];
+  if (a.persona.deaf && a.noticedAt !== null && a.noticedAt > 5) out.push(`did not know there was a fire until ${Math.round(a.noticedAt)}s`);
+  if (a.persona.deaf && a.noticedAt === null) out.push("never realised there was a fire");
+  if (a.missedOrders) out.push(`${a.missedOrders} order${a.missedOrders === 1 ? "" : "s"} by name never reached them (nobody beside them to pass it on)`);
+  if (a.frozenFor > 3) out.push(`froze in panic for ${Math.round(a.frozenFor)}s`);
+  if (a.blockedAt) out.push(`reached the stepped fire exit in the ${a.blockedAt} and could not use it`);
+  if (a.persona.hearingDelay >= 5 && a.heard.length) out.push(`heard announcements ${a.persona.hearingDelay}s late`);
+  return out;
+}
+
+export interface Finding {
+  id: number;
+  name: string;
+  color: string;
+  icon: string;
+  label: string;
+  outcome: string;
+  trouble: string[];
+  failed: boolean;
+}
+
+/**
+ * Who this evacuation plan failed: everyone who did not get out, and everyone at risk who did
+ * but only after something went wrong. The most useful thing a drill can tell you.
+ */
+export function findings(): Finding[] {
+  const out = lab.agents.filter((a) => a.status === "safe").map((a) => a.endedAt ?? 0).sort((a, b) => a - b);
+  const median = out.length ? out[Math.floor(out.length / 2)] : 0;
+  return lab.agents
+    .map((a) => {
+      const trouble = troubleOf(a);
+      const failed = a.status === "down" || (a.status === "inside" && !a.sheltering);
+      const slow = a.status === "safe" && median > 0 && (a.endedAt ?? 0) > median * 1.6;
+      if (slow) trouble.push(`out last, at ${Math.round(a.endedAt ?? 0)}s (most were out by ${Math.round(median)}s)`);
+      const outcome =
+        a.status === "down"
+          ? `collapsed in the ${placeName(a.room)} at ${Math.round(a.endedAt ?? 0)}s`
+          : a.status === "safe"
+            ? `got out via the ${a.exit} exit at ${Math.round(a.endedAt ?? 0)}s`
+            : a.sheltering
+              ? `sheltering in the ${placeName(a.room)}, waiting for firefighters`
+              : `still inside the ${placeName(a.room)} when the drill ended`;
+      return { id: a.id, name: a.name, color: a.color, icon: a.persona.icon ?? "", label: a.persona.label ?? a.persona.kind, outcome, trouble, failed };
+    })
+    .filter((f) => f.failed || f.trouble.length)
+    .sort((a, b) => Number(b.failed) - Number(a.failed) || b.trouble.length - a.trouble.length);
+}
+
+/** One person's outcome in one audited drill. */
+export interface AuditPerson {
+  id: number;
+  name: string;
+  kind: string;
+  label: string;
+  icon: string;
+  survived: boolean;
+  status: Status;
+  endedAt: number | null;
+  /** where they ended up: the room they collapsed or got stuck in, or the exit they used */
+  where: string;
+  trouble: string[];
+}
+
+/** One drill of a building audit, condensed to what the audit report needs. */
+export interface AuditDrill {
+  at: number;
+  scenarioId: string;
+  scenario: string;
+  origin: RoomId;
+  agents: number;
+  survived: number;
+  down: number;
+  stuck: number;
+  meanEscape: number | null;
+  lastOut: number | null;
+  exits: Record<string, number>;
+  people: AuditPerson[];
+  replayId: string | null;
+  cost: number;
+}
+
+export function auditDrill(replayId: string | null): AuditDrill | null {
+  const result = summarise();
+  if (!result || !lab.scenario) return null;
+  const out = lab.agents.filter((a) => a.status === "safe").map((a) => a.endedAt ?? 0);
+  return {
+    at: Date.now(),
+    scenarioId: lab.scenario.id,
+    scenario: lab.scenario.label,
+    origin: lab.scenario.origin,
+    agents: result.agents,
+    survived: result.safe + result.sheltered,
+    down: result.down,
+    stuck: result.inside,
+    meanEscape: result.meanEscape,
+    lastOut: out.length ? Math.round(Math.max(...out)) : null,
+    exits: result.exits,
+    people: lab.agents.map((a) => ({
+      id: a.id,
+      name: a.name,
+      kind: a.persona.kind,
+      label: a.persona.label ?? a.persona.kind,
+      icon: a.persona.icon ?? "",
+      survived: a.status === "safe" || (a.status === "inside" && a.sheltering),
+      status: a.status,
+      endedAt: a.endedAt === null ? null : Math.round(a.endedAt),
+      where: a.status === "safe" ? `${a.exit} exit` : placeName(a.room),
+      trouble: troubleOf(a),
+    })),
+    replayId,
+    cost: result.cost,
+  };
+}
+
 export interface Review {
   verdict?: string;
   coordination_score?: number;
@@ -821,7 +1086,7 @@ export async function debrief(learn = false): Promise<Review | null> {
   if (!result) throw new Error("no run");
   const people = lab.agents.map(
     (a) =>
-      `#${a.id} ${a.name} (${a.persona.kind}) -> ${a.status}${a.endedAt ? ` at ${Math.round(a.endedAt)}s` : ""}${a.exit ? ` via ${a.exit}` : ""}; exposure ${Math.round(a.exposure)}. Decisions: ${a.history
+      `#${a.id} ${a.name} (${a.persona.label ?? a.persona.kind}) -> ${a.status}${a.endedAt ? ` at ${Math.round(a.endedAt)}s` : ""}${a.exit ? ` via ${a.exit}` : ""}; exposure ${Math.round(a.exposure)}.${troubleOf(a).map((x) => ` ${x}.`).join("")} Decisions: ${a.history
         .slice(0, 8)
         .map((h) => `[${h.t}s ${h.room}] ${h.choice} ("${h.thought}")`)
         .join(" ")}`,
@@ -920,6 +1185,11 @@ export function playReplay(replay: Replay) {
     smokeSeen: 0,
     sheltering: false,
     order: null,
+    frozenUntil: 0,
+    frozenFor: 0,
+    noticedAt: 0,
+    missedOrders: 0,
+    blockedAt: null,
     endedAt: null,
     exit: null,
     history: [],
@@ -945,6 +1215,7 @@ function applyFrame(t: number) {
     agent.room = roomAt(agent.x, agent.z);
     agent.status = STATUS[a[o + 3]] ?? "inside";
     agent.sheltering = a[o + 4] === 1;
+    agent.frozenUntil = a[o + 4] === 2 ? t + 1 : 0;
     agent.pace = PACE[a[o + 5]] ?? "walk";
     agent.health = a[o + 6];
     agent.lastDecisionAt = a[o + 7];

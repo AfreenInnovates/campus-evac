@@ -14,16 +14,17 @@ export type Speaker = "warden" | "narrator";
 
 const KEY = "campusevac:crowd-voice";
 
-export const useVoice = create<{ on: boolean; source: "polly" | "browser" | null }>(() => ({
-  on: (() => {
-    try {
-      return typeof window === "undefined" || localStorage.getItem(KEY) !== "off";
-    } catch {
-      return true;
-    }
-  })(),
-  source: null,
-}));
+// starts on for everyone, server and browser alike, so the first render matches; the saved choice is read after
+export const useVoice = create<{ on: boolean; source: "polly" | "browser" | null }>(() => ({ on: true, source: null }));
+
+/** Apply the visitor's saved choice. Called once the page is running in the browser. */
+export function loadVoiceChoice() {
+  try {
+    if (localStorage.getItem(KEY) === "off") useVoice.setState({ on: false });
+  } catch {
+    /* keep the default */
+  }
+}
 
 export function setVoiceOn(on: boolean) {
   try {

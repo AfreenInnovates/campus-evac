@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { lab, MAX_RUN_SECONDS, useLab, type LabEvent, type LogEntry } from "./engine";
-import { setVoiceOn, speak, stopSpeaking, useVoice } from "./voice";
+import { loadVoiceChoice, setVoiceOn, speak, stopSpeaking, useVoice } from "./voice";
 
 /**
  * The simple view: the drill explains itself.
@@ -168,6 +168,7 @@ export function Scoreboard() {
 
 export function VoiceToggle({ className = "" }: { className?: string }) {
   const on = useVoice((s) => s.on);
+  useEffect(loadVoiceChoice, []);
   return (
     <button onClick={() => setVoiceOn(!on)} className={className} aria-pressed={on} title={on ? "Turn the voice off" : "Turn the voice on"}>
       {on ? "🔊 Voice" : "🔈 Muted"}

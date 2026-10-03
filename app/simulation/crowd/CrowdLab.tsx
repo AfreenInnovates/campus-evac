@@ -4,12 +4,14 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { playReplay, takeReplay, debrief, humanBroadcast, lab, MAX_RUN_SECONDS, RUN_BUDGET_USD, setRunning, setupRun, summarise, useLab, type LabConfig, type RunResult, type WardenMode } from "./engine";
+import { auditDrill, playReplay, takeReplay, debrief, findings, humanBroadcast, lab, MAX_RUN_SECONDS, RUN_BUDGET_USD, setRunning, setupRun, summarise, useLab, type LabConfig, type RunResult, type WardenMode } from "./engine";
 import { MODELS } from "./prompts";
 import { useSpectator } from "./CrowdScene";
 import { PortraitBlock } from "../components/PortraitBlock";
+import { enterLandscape } from "../orientation";
 import { adminKey, hydratePlaybook, nextDrillNumber, recordPoint, usePlaybook } from "./playbook";
-import { findReplay, saveReplay, shareReplay, type Replay } from "./replay";
+import { findReplay, replayById, saveReplay, shareReplay, type Replay } from "./replay";
+import AuditPanel, { beginAudit, recordAuditDrill } from "./Audit";
 import TrainingPanel, { type QueueItem } from "./Training";
 import { Caption, PABanner, Scoreboard, useStory, VoiceToggle } from "./Story";
 import { pauseVoice, resumeVoice, setVoiceRate, speak, stopSpeaking } from "./voice";
@@ -61,14 +63,24 @@ function Panel({ title, right, children, className = "" }: { title: string; righ
 
 export const DEFAULT_CONFIG: LabConfig = { scenarioId: SCENARIOS[0].id, agents: 12, warden: "ai", seed: 7, wardenEvery: 12, playbook: true };
 
+/** A new drill puts new people in new places; only an explicit seed (or "run again") repeats one. */
+export const freshSeed = () => 1 + Math.floor(Math.random() * 999_999);
+
 /**
  * One choice and one button. Where the fire starts is the only thing most people want to
  * pick; the knobs for experiments fold away under "More options".
  */
-function Setup({ onStart, compact = false }: { onStart: (config: LabConfig) => void; compact?: boolean }) {
+function Setup({ onStart, onAudit, compact = false }: { onStart: (config: LabConfig) => void; onAudit: () => void; compact?: boolean }) {
   const navReady = useSpectator((s) => s.navReady);
   const [config, setConfig] = useState<LabConfig>(DEFAULT_CONFIG);
   const [more, setMore] = useState(false);
+  // a seed typed in by hand is kept; otherwise every drill is a new crowd
+  const [pinnedSeed, setPinnedSeed] = useState(false);
+  const go = (next: LabConfig) => {
+    // on a phone or tablet, go full screen and sideways: only allowed from a tap like this one
+    void enterLandscape();
+    onStart({ ...next, seed: pinnedSeed ? next.seed : freshSeed() });
+  };
   const scenario = SCENARIOS.find((s) => s.id === config.scenarioId)!;
   const playbook = usePlaybook((s) => s.playbook);
   const set = (patch: Partial<LabConfig>) => setConfig((c) => ({ ...c, ...patch }));
@@ -77,12 +89,12 @@ function Setup({ onStart, compact = false }: { onStart: (config: LabConfig) => v
   return (
     <Panel title="Start a drill">
       <label className={label}>Where does the fire start?</label>
-      <div className="mt-1.5 grid grid-cols-1 gap-1">
+      <div className="mt-1.5 grid grid-cols-2 gap-1">
         {SCENARIOS.map((s) => (
           <button
             key={s.id}
             onClick={() => set({ scenarioId: s.id })}
-            className={`border-2 px-2.5 py-1.5 text-left text-[12px] font-bold ${config.scenarioId === s.id ? "border-sun bg-sun/15 text-paper" : "border-paper/15 text-paper/70 hover:border-paper/40"}`}
+            className={`border-2 px-2 py-1.5 text-left text-[11px] font-bold leading-tight ${config.scenarioId === s.id ? "border-sun bg-sun/15 text-paper" : "border-paper/15 text-paper/70 hover:border-paper/40"}`}
           >
             {s.label.replace(/^[A-Z][a-z]+ fire in (the )?/, "").replace(/^Fire in (the )?/, "") || s.label}
           </button>
@@ -90,15 +102,21 @@ function Setup({ onStart, compact = false }: { onStart: (config: LabConfig) => v
       </div>
       <p className="mt-1.5 text-[11px] text-paper/55">{scenario.blurb}</p>
 
-      <button onClick={() => onStart(config)} disabled={!navReady} className="brutal-button mt-3 w-full px-4 py-3 disabled:opacity-60">
+      <button onClick={() => go(config)} disabled={!navReady} className="brutal-button mt-3 w-full px-4 py-3 disabled:opacity-60">
         {navReady ? "Sound the alarm" : "Preparing the building…"}
       </button>
       <button
-        onClick={() => onStart({ ...config, warden: "human" })}
+        onClick={() => go({ ...config, warden: "human" })}
         disabled={!navReady}
         className="mt-2 w-full text-center text-[11px] font-bold text-paper/60 underline underline-offset-4 hover:text-paper disabled:opacity-50"
       >
         or be the warden yourself, and see if you beat the AI
+      </button>
+      <button
+        onClick={onAudit}
+        className="mt-2 w-full border-2 border-dashed border-[#38bdf8]/60 px-2 py-1.5 text-[11px] font-black uppercase tracking-[0.1em] text-[#38bdf8] hover:border-[#38bdf8]"
+      >
+        Audit the whole building: every fire
       </button>
 
       <button onClick={() => setMore((v) => !v)} className="mt-2.5 text-[10px] font-black uppercase tracking-[0.16em] text-paper/50 hover:text-paper" aria-expanded={more}>
@@ -133,11 +151,15 @@ function Setup({ onStart, compact = false }: { onStart: (config: LabConfig) => v
             </label>
           )}
           <label className={`block ${label}`}>
-            Seed <span className="normal-case tracking-normal text-paper/40">(same seed, same people in the same places)</span>
+            Seed <span className="normal-case tracking-normal text-paper/40">(blank: new people every drill; a number repeats the same crowd)</span>
             <input
               type="number"
-              value={config.seed}
-              onChange={(e) => set({ seed: Number(e.target.value) || 1 })}
+              placeholder="random"
+              value={pinnedSeed ? config.seed : ""}
+              onChange={(e) => {
+                setPinnedSeed(e.target.value !== "");
+                set({ seed: Number(e.target.value) || 1 });
+              }}
               className="mt-1 w-full border-2 border-paper/25 bg-night px-2 py-1 font-mono text-[12px] text-paper"
             />
           </label>
@@ -224,7 +246,7 @@ function People() {
             >
               <div className="flex items-center justify-between gap-2 text-[11px] font-black">
                 <span className="truncate">
-                  #{agent.id} {agent.name} <span className="font-bold text-paper/45">· {agent.persona.kind}</span>
+                  {agent.persona.icon ? `${agent.persona.icon} ` : ""}#{agent.id} {agent.name} <span className="font-bold text-paper/45">· {agent.persona.label ?? agent.persona.kind}</span>
                 </span>
                 <span className={`shrink-0 font-mono text-[10px] ${agent.status === "safe" ? "text-mint" : agent.status === "down" ? "text-danger" : "text-paper/60"}`}>
                   {agent.status === "inside" ? `${agent.sheltering ? "sheltering · " : ""}${Math.round(agent.health)}♥ ${placeName(agent.room)}` : agent.status}
@@ -406,6 +428,7 @@ function Results({ onAgain, onSetup, onCompare, onWatch }: { onAgain: () => void
     if (summary) saveExperiment(summary);
     return summary;
   });
+  const [failedFor] = useState(findings);
   const [review, setReview] = useState<Awaited<ReturnType<typeof debrief>> | "loading" | "error" | null>(null);
   const [shown, setShown] = useState(true);
 
@@ -443,6 +466,25 @@ function Results({ onAgain, onSetup, onCompare, onWatch }: { onAgain: () => void
         <p className="mt-2 text-[11px] text-paper/55">
           Exits used: {Object.entries(result.exits).map(([exit, n]) => `${exit} ${n}`).join(" · ") || "none"} · {result.announcements} announcements · {result.calls} model calls
         </p>
+
+        <div className="mt-4 border-t border-paper/15 pt-4">
+          <h3 className="text-[11px] font-black uppercase tracking-[0.16em] text-danger">Who this plan failed</h3>
+          {failedFor.length ? (
+            <ul className="mt-2 space-y-1.5">
+              {failedFor.slice(0, 6).map((f) => (
+                <li key={f.id} className="border-l-4 bg-night/50 px-2.5 py-1.5" style={{ borderLeftColor: f.failed ? "#ef4444" : "#facc15" }}>
+                  <div className="text-[12px] font-black">
+                    {f.icon} #{f.id} {f.name} <span className="font-bold text-paper/55">· {f.label}</span>
+                  </div>
+                  <div className={`text-[11px] ${f.failed ? "text-danger" : "text-paper/75"}`}>{f.outcome}</div>
+                  {f.trouble.length > 0 && <div className="text-[11px] leading-snug text-paper/60">{f.trouble.join(" · ")}</div>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-1 text-[12px] text-mint">Nobody. Everyone, including the people most at risk, got out without trouble.</p>
+          )}
+        </div>
 
         <div className="mt-4 border-t border-paper/15 pt-4">
           {review === null && (
@@ -576,7 +618,8 @@ function PlaybookBadge() {
 /* ------------------------------------------------------------------ shell */
 
 /** Phones and narrow windows get one drawer instead of two fixed side panels. */
-const compactQuery = "(max-width: 1099px), (max-height: 620px), (pointer: coarse)";
+// phones (and small windows) get one drawer; a big tablet held sideways has room for the full layout
+const compactQuery = "(max-width: 1099px), (max-height: 620px)";
 function useCompact() {
   return useSyncExternalStore(
     (onChange) => {
@@ -619,6 +662,7 @@ export default function CrowdLab() {
   const [showExperiments, setShowExperiments] = useState(false);
   const [drawer, setDrawer] = useState<"people" | "warden" | "log" | null>(null);
   const [showTraining, setShowTraining] = useState(false);
+  const [showAudit, setShowAudit] = useState(false);
   // the simple view is the default; the panels with every detail are one click away
   const [details, setDetails] = useState(false);
   const story = useStory();
@@ -682,6 +726,7 @@ export default function CrowdLab() {
     stopSpeaking();
     setVoiceRate(1);
     setShowTraining(false);
+    setShowAudit(false);
     setQueue(null);
     setConfig(replay.config);
     setDrawer(null);
@@ -712,6 +757,7 @@ export default function CrowdLab() {
 
   const runQueue = (items: QueueItem[], label: string) => {
     setShowTraining(false);
+    setShowAudit(false);
     setQueue({ items, index: 0, label });
     start(items[0].config);
   };
@@ -722,6 +768,30 @@ export default function CrowdLab() {
     if (!finished || !queue || handled.current === lab.runId) return;
     handled.current = lab.runId;
     const item = queue.items[queue.index];
+    // the queue's next drill, or its end and the panel that shows what it found
+    const advance = () => {
+      const next = queue.index + 1;
+      if (next >= queue.items.length) {
+        setQuietRun(lab.runId);
+        setQueue(null);
+        if (item.tag === "audit") setShowAudit(true);
+        else setShowTraining(true);
+        return;
+      }
+      setQueue({ ...queue, index: next });
+      window.setTimeout(() => start(queue.items[next].config), 1200);
+    };
+    if (item.tag === "audit") {
+      // an audit only records what happened; no review, no learning, nothing to wait for
+      const replay = takeReplay(null);
+      savedRun.current = lab.runId;
+      if (replay) void saveReplay(replay);
+      const drill = auditDrill(replay?.id ?? null);
+      if (drill) recordAuditDrill(drill);
+      advance();
+      return;
+    }
+    const tag = item.tag;
     void (async () => {
       const drill = nextDrillNumber();
       const replay = takeReplay(item.learn ? drill : null);
@@ -741,7 +811,7 @@ export default function CrowdLab() {
         recordPoint({
           drill,
           at: Date.now(),
-          tag: item.tag,
+          tag,
           scenarioId: item.config.scenarioId,
           scenario: summary.scenario,
           seed: summary.seed,
@@ -766,15 +836,7 @@ export default function CrowdLab() {
         );
         window.setTimeout(() => setLesson((current) => (current === shown ? null : current)), 9000);
       }
-      const next = queue.index + 1;
-      if (next >= queue.items.length) {
-        setQuietRun(lab.runId);
-        setQueue(null);
-        setShowTraining(true);
-        return;
-      }
-      setQueue({ ...queue, index: next });
-      window.setTimeout(() => start(queue.items[next].config), 1200);
+      advance();
     })();
   }, [finished, queue]);
 
@@ -819,6 +881,9 @@ export default function CrowdLab() {
               New
             </button>
           )}
+          <button onClick={() => setShowAudit(true)} className={`${barButton} border-[#38bdf8]/70 text-[#38bdf8]`}>
+            Audit
+          </button>
           <button onClick={() => setShowTraining(true)} className={`${barButton} border-sun/70 text-sun`}>
             Train
           </button>
@@ -830,12 +895,12 @@ export default function CrowdLab() {
         (compact ? (
           <div className="pointer-events-auto absolute inset-0 z-20 grid place-items-center overflow-y-auto bg-night/40 p-3 pt-14">
             <div className="w-full max-w-2xl">
-              <Setup onStart={start} compact />
+              <Setup onStart={start} onAudit={() => setShowAudit(true)} compact />
             </div>
           </div>
         ) : (
           <aside className="pointer-events-none absolute bottom-4 left-4 top-[4.5rem] z-10 flex w-[19rem] flex-col">
-            <Setup onStart={start} />
+            <Setup onStart={start} onAudit={() => setShowAudit(true)} />
           </aside>
         ))}
 
@@ -920,7 +985,7 @@ export default function CrowdLab() {
         <div className={`pointer-events-auto absolute left-1/2 z-20 flex -translate-x-1/2 items-center gap-3 border-2 border-sun bg-night/90 px-3 py-1.5 ${compact ? "top-12" : "top-[4.2rem]"}`}>
           <span className="signal-pulse h-2 w-2 rounded-full bg-sun" />
           <span className="text-[11px] font-black uppercase tracking-[0.12em] text-sun">
-            {queue.label === "Training drill" ? "Training the warden" : queue.label} · drill {queue.index + 1} of {queue.items.length}
+            {queue.label === "Training drill" ? "Training the warden" : queue.label} · {queue.items[queue.index].tag === "audit" ? `fire ${queue.index + 1} of ${queue.items.length}` : `drill ${queue.index + 1} of ${queue.items.length}`}
           </span>
           {reviewing && <span className="text-[10px] text-paper/70">Nemotron Ultra is reviewing the drill…</span>}
           <PlaybookBadge />
@@ -953,7 +1018,8 @@ export default function CrowdLab() {
         <Intro
           onWatch={() => {
             setIntroClosed(true);
-            start({ ...DEFAULT_CONFIG });
+            void enterLandscape();
+            start({ ...DEFAULT_CONFIG, seed: freshSeed() });
           }}
           onSetup={() => setIntroClosed(true)}
         />
@@ -972,6 +1038,18 @@ export default function CrowdLab() {
         />
       )}
       {showExperiments && <Experiments onClose={() => setShowExperiments(false)} />}
+      {showAudit && (
+        <AuditPanel
+          busy={!!queue}
+          onClose={() => setShowAudit(false)}
+          onRun={() => runQueue(beginAudit(freshSeed()), "Building audit")}
+          onWatch={async (id, label) => {
+            const replay = await replayById(id);
+            if (replay) playRecorded(replay, label);
+            else window.alert("That drill is no longer stored in this browser.");
+          }}
+        />
+      )}
       <PortraitBlock onBlock={pauseRun} />
     </div>
   );
