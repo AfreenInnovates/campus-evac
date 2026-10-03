@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { humanBroadcast, useLab, type WardenMode } from "./engine";
-import { STATUS_LABEL, type OrderStatus } from "./orders";
+import { humanBroadcast, lab, readOrder, useLab, type WardenMode } from "./engine";
+import { isRelative, routeRooms, STATUS_LABEL, type OrderStatus } from "./orders";
 import { placeName } from "./world";
 
 /**
@@ -75,6 +75,34 @@ const QUICK = [
   "If every way out is smoky: shut the door and shelter.",
 ];
 
+/** One line on how an order will be understood, so a human warden can fix it before sending. */
+function OrderPreview({ text }: { text: string }) {
+  if (!text.trim()) return <p className="mt-1 text-[10px] text-paper/45">Start with numbers (#3 #5: or #10 go west) to give those people an order you can track.</p>;
+  const { people, target } = readOrder(text);
+  const who = people.length ? people.map((id) => `#${id}`).join(", ") : "everyone (PA)";
+  if (isRelative(text) && !target)
+    return <p className="mt-1 text-[10px] text-danger">Left and right depend on which way someone is facing. Use north, south, east, west, or name a room or exit.</p>;
+  if (!target) return <p className="mt-1 text-[10px] text-sun">To {who}: no destination recognised. They will hear it, but nobody can tell whether they follow it.</p>;
+  // whoever would have to go through the burning room to get there
+  const fire = lab.scenario?.origin;
+  const through = people.filter((id) => {
+    const person = lab.agents.find((a) => a.id === id);
+    return !!person && !!fire && person.room !== fire && routeRooms(person.room, target, fire).includes(fire);
+  });
+  if (through.length)
+    return (
+      <p className="mt-1 text-[10px] text-danger">
+        To {who} → {target.label} · the only way there for {through.map((id) => `#${id}`).join(", ")} runs through the fire
+      </p>
+    );
+  return (
+    <p className="mt-1 text-[10px] text-mint">
+      To {who} → {target.label}
+      {people.length ? " · tracked" : " · tracked only when sent to people by number"}
+    </p>
+  );
+}
+
 function OrderBox() {
   const [draft, setDraft] = useState("");
   return (
@@ -103,7 +131,7 @@ function OrderBox() {
           </button>
         ))}
       </div>
-      <p className="mt-1 text-[10px] text-paper/45">Start with numbers (#3 #5:) to give those people an order you can track.</p>
+      <OrderPreview text={draft} />
     </div>
   );
 }

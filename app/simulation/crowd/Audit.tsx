@@ -7,6 +7,7 @@ import { FIXES, fixById, type FixId } from "./fixes";
 import { costOf } from "./prompts";
 import { addFrames, emptyHeat, HEAT, paintHeat } from "./heat";
 import { replayById } from "./replay";
+import { scorecard, ScorecardView } from "./Scorecard";
 import type { QueueItem } from "./Training";
 import { LINKS, placeName, SCENARIOS } from "./world";
 
@@ -190,6 +191,9 @@ function describeAudit(report: ReturnType<typeof summariseAudit>) {
     ...report.risk.map((g) => `- ${g.label}: ${g.survived}/${g.seen} survived${g.meanOut !== null ? `, mean time out ${g.meanOut}s` : ""}${g.commonTrouble ? `; often: ${g.commonTrouble}` : ""}`),
     `Everyone's mean time out: ${report.everyoneOut ?? "n/a"}s.`,
     "",
+    "Evidence scorecard (known causes of fire deaths, measured here):",
+    ...scorecard(report.drills).map((c) => `- ${c.pass ? "PASS" : "FAIL"} ${c.title}: ${c.measured}.`),
+    "",
     "Fixes available (choose by id):",
     ...FIXES.map((fix) => `- ${fix.id}: ${fix.title}. ${fix.detail} Helps: ${fix.helps}.`),
   ].join("\n");
@@ -241,6 +245,26 @@ function Delta({ before, of, after, outOf }: { before: number; of: number; after
   );
 }
 
+/** Which of the six checks each side passes: the plainest summary of whether the fixes worked. */
+function ScoreShift({ before, after }: { before: AuditDrill[]; after: AuditDrill[] }) {
+  const a = scorecard(before);
+  const b = new Map(scorecard(after).map((c) => [c.id, c]));
+  if (!a.length || !b.size) return null;
+  return (
+    <div className="mt-2 flex flex-wrap gap-1">
+      {a.map((c) => {
+        const now = b.get(c.id);
+        const tone = now?.pass ? (c.pass ? "border-mint/40 text-mint/70" : "border-mint bg-mint/15 text-mint") : c.pass ? "border-danger bg-danger/15 text-danger" : "border-danger/40 text-danger/70";
+        return (
+          <span key={c.id} className={`border px-1.5 py-0.5 text-[10px] font-bold ${tone}`} title={now?.measured}>
+            {c.title}: {c.pass ? "pass" : "fail"} → {now?.pass ? "pass" : "fail"}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function BeforeAfter({ base, trial, onWatch }: { base: AuditRun; trial: AuditRun; onWatch: (replayId: string, label: string) => void }) {
   const c = compareTrial(base, trial);
   return (
@@ -252,6 +276,7 @@ function BeforeAfter({ base, trial, onWatch }: { base: AuditRun; trial: AuditRun
         </span>
       </div>
       <p className="mt-1 text-[11px] text-paper/60">With: {trial.fixes.map((id) => fixById(id).title).join(" · ")}</p>
+      <ScoreShift before={c.before.drills} after={trial.drills} />
       <div className="mt-2 grid gap-3 md:grid-cols-2">
         <div>
           <div className="text-[9px] font-black uppercase tracking-[0.14em] text-paper/45">Survived</div>
@@ -550,6 +575,10 @@ export default function AuditPanel({
                   </ul>
                 </div>
               </div>
+            </div>
+
+            <div className="mt-4 border border-paper/15 bg-night/40 p-3">
+              <ScorecardView drills={report.drills} />
             </div>
 
             <div className="mt-4 overflow-x-auto">

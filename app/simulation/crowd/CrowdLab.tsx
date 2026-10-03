@@ -4,6 +4,7 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { ScorecardView } from "./Scorecard";
 import { auditDrill, playReplay, takeReplay, debrief, findings, humanBroadcast, lab, MAX_RUN_SECONDS, RUN_BUDGET_USD, setRunning, setupRun, summarise, useLab, type LabConfig, type RunResult, type WardenMode } from "./engine";
 import { MODELS } from "./prompts";
 import { useSpectator } from "./CrowdScene";
@@ -429,6 +430,7 @@ function Results({ onAgain, onSetup, onCompare, onWatch }: { onAgain: () => void
     return summary;
   });
   const [failedFor] = useState(findings);
+  const [checks] = useState(() => auditDrill(null));
   const [review, setReview] = useState<Awaited<ReturnType<typeof debrief>> | "loading" | "error" | null>(null);
   const [shown, setShown] = useState(true);
 
@@ -466,6 +468,12 @@ function Results({ onAgain, onSetup, onCompare, onWatch }: { onAgain: () => void
         <p className="mt-2 text-[11px] text-paper/55">
           Exits used: {Object.entries(result.exits).map(([exit, n]) => `${exit} ${n}`).join(" · ") || "none"} · {result.announcements} announcements · {result.calls} model calls
         </p>
+
+        {checks && (
+          <div className="mt-4 border-t border-paper/15 pt-4">
+            <ScorecardView drills={[checks]} compact />
+          </div>
+        )}
 
         <div className="mt-4 border-t border-paper/15 pt-4">
           <h3 className="text-[11px] font-black uppercase tracking-[0.16em] text-danger">Who this plan failed</h3>

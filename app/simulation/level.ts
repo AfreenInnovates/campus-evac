@@ -108,7 +108,7 @@ export const ROOMS: RoomDef[] = [
   },
   {
     id: "wcorr",
-    name: "Science Block / Passage",
+    name: "Science Block / West Passage",
     blurb: "Candidate route to the outdoor assembly point.",
     bounds: { minX: -8, maxX: -5.5, minZ: 1, maxZ: 4 },
     fog: false,
@@ -117,7 +117,7 @@ export const ROOMS: RoomDef[] = [
   },
   {
     id: "ecorr",
-    name: "Academic Block / Passage",
+    name: "Academic Block / East Passage",
     blurb: "Route edge that becomes unsafe during the scenario.",
     bounds: { minX: 5.5, maxX: 8, minZ: 1, maxZ: 4 },
     fog: false,

@@ -5,7 +5,7 @@ import { roomAt, roomById, type RoomId } from "../level";
 import { cellOf, findPath, walkable, type NavGrid } from "./nav";
 import { costOf, type CrowdTask } from "./prompts";
 import { adoptRules, nextDrillNumber, standingOrders, usePlaybook } from "./playbook";
-import { judge, parseTarget, type Order, type Target } from "./orders";
+import { judge, nextHop, parseTarget, type Order, type Target } from "./orders";
 import { hasFix, type FixId } from "./fixes";
 import { FIELDS, FRAME_EVERY, ORDER, PACE, STATUS, type Replay } from "./replay";
 import {
@@ -189,6 +189,13 @@ export interface Agent {
   blockedAt: string | null;
   /** the last room the warden addressed them as being in, when it was wrong */
   misplaced: { said: string; was: string } | null;
+  /** when they first took a step after the alarm, and when they last moved */
+  firstMoveAt: number | null;
+  movedAt: number;
+  /** seconds spent where smoke hid the signs */
+  blindFor: number;
+  /** the exit closest to where they were when the alarm went, by walking distance */
+  nearestExit: string | null;
   endedAt: number | null;
   exit: string | null;
   history: { t: number; room: string; choice: string; thought: string }[];
@@ -298,6 +305,28 @@ function firstRoomNamed(text: string): RoomId | null {
 
 /** Whether this run's building has a given fix in place. */
 const fixed = (id: FixId) => hasFix(lab.config?.fixes, id);
+
+/** Smoke this thick hides the signs overhead; low-level glowing signs stay readable in much more. */
+const hidesSigns = (smoke: number) => smoke > (fixed("low-signs") ? 0.8 : 0.45);
+
+/** The exit closest to a spot by walking distance, among those this person can use. */
+function nearestExitFor(agent: Agent) {
+  if (!lab.grid) return null;
+  let best: { exit: string; length: number } | null = null;
+  for (const link of LINKS) {
+    if (!link.exit || impassable(agent, link)) continue;
+    const path = findPath(lab.grid, [agent.x, agent.z], link.door);
+    if (!path) continue;
+    let length = 0;
+    let [px, pz] = [agent.x, agent.z];
+    for (const [x, z] of path) {
+      length += Math.hypot(x - px, z - pz);
+      [px, pz] = [x, z];
+    }
+    if (!best || length < best.length) best = { exit: link.exit, length };
+  }
+  return best?.exit ?? null;
+}
 
 /** A doorway this person physically cannot use: steps, for a wheelchair, unless they were ramped. */
 const impassable = (agent: Agent, link: Link) => !!agent.persona.stepFree && !!link.steps && !fixed("ramp");
@@ -441,11 +470,16 @@ export function setupRun(config: LabConfig) {
       missedOrders: 0,
       blockedAt: null,
       misplaced: null,
+      firstMoveAt: null,
+      movedAt: 0,
+      blindFor: 0,
+      nearestExit: null,
       endedAt: null,
       exit: null,
       history: [],
     });
   }
+  for (const agent of lab.agents) agent.nearestExit = nearestExitFor(agent);
   note("system", `${scenario.label}. ${config.agents} people inside. Warden: ${config.warden === "ai" ? "AI (vision)" : config.warden === "human" ? "you" : "none"}.`, undefined, {
     type: "start",
     room: placeName(scenario.origin),
@@ -502,7 +536,7 @@ function perceive(agent: Agent) {
   const origin = lab.scenario!.origin;
   // in thick smoke you cannot read a sign or see past a doorway: you need someone to tell you
   // low-level glowing signs stay readable under smoke that hides the ones overhead
-  const blind = smokeHere > (fixed("low-signs") ? 0.8 : 0.45);
+  const blind = hidesSigns(smokeHere);
   const persona = agent.persona;
   // a wheelchair cannot go down steps: that doorway is not an option, only a dead end in view
   const steps = linksOf(here).filter((link) => impassable(agent, link));
@@ -560,6 +594,7 @@ function perceive(agent: Agent) {
             : "You have not heard any announcement yet, only the alarm.",
       persona.panics ? "Your heart is pounding and it is hard to think straight; you badly want to do whatever the people nearest you are doing." : "",
       persona.canCrawl === false ? "You cannot get down onto the floor to crawl." : "",
+      "You came into the building this morning through the MAIN ENTRANCE on the south side.",
       `Rooms you have been in, in order: ${agent.visited.map(placeName).join(" -> ")}.`,
       `Why you are deciding now: ${agent.wants ?? "checking your situation"}.`,
       agent.persona.canRun ? "" : "You cannot run.",
@@ -573,13 +608,32 @@ function perceive(agent: Agent) {
 
 /* ------------------------------------------------------------------ deciding */
 
-function goThrough(agent: Agent, link: Link) {
-  const target = farPoint(link, agent.room);
+function goThrough(agent: Agent, link: Link, from: RoomId = agent.room) {
+  const target = farPoint(link, from);
   const path = lab.grid ? findPath(lab.grid, [agent.x, agent.z], target) : [target];
   if (!path) return false;
   agent.path = path;
   agent.leg = 0;
   agent.via = link;
+  return true;
+}
+
+/**
+ * Someone who chose to follow the warden keeps going: through the next doorway on the route,
+ * without stopping to deliberate at every one. They think again only if the way ahead is
+ * choking with smoke, or the route runs out.
+ */
+function keepFollowing(agent: Agent, room: RoomId) {
+  const order = agent.order;
+  if (!order || order.status !== "following") return false;
+  const hop = nextHop(room, order.target, lab.scenario?.origin);
+  if (!hop || impassable(agent, hop)) return false;
+  const beyond = otherSide(hop, room);
+  if (beyond !== "outside" && smokeAt(beyond, lab.t, lab.hops) > 0.6) return false;
+  if (!goThrough(agent, hop, room)) return false;
+  agent.action = `keeps following the warden: ${beyond === "outside" ? `out of the ${hop.exit} exit` : `on to the ${placeName(beyond)}`}`;
+  agent.history.push({ t: Math.round(lab.t), room: placeName(room), choice: agent.action, thought: agent.thought });
+  note("agent", `${agent.name} (#${agent.id}) ${agent.action}`, agent.id);
   return true;
 }
 
@@ -602,7 +656,7 @@ async function decide(agent: Agent) {
     const pace: Pace = answer.pace === "run" && agent.persona.canRun ? "run" : answer.pace === "crawl" && agent.persona.canCrawl !== false ? "crawl" : "walk";
     agent.thought = String(answer.thought ?? "").slice(0, 160) || "…";
     agent.decisions++;
-    if (agent.order && agent.order.status !== "done") agent.order.status = judge(agent.order, seen.room, option?.link ?? null, shelter);
+    if (agent.order && agent.order.status !== "done") agent.order.status = judge(agent.order, seen.room, option?.link ?? null, shelter, lab.scenario?.origin);
     agent.pace = pace;
     if (shelter) {
       agent.path = null;
@@ -695,11 +749,21 @@ function deliver(text: string, people: number[] | null, kind: "warden" | "human"
   note(kind, people ? `To #${people.join(", #")}: “${clean}”` : `PA: “${clean}”`, undefined, { type: "announce", text: clean, people });
 }
 
-export function humanBroadcast(text: string) {
+/**
+ * How an order typed by a human warden is understood: who it is for ("#3 #5: ...", "#10 go
+ * west") and where it sends them. The order box previews exactly this before sending.
+ */
+export function readOrder(text: string) {
   const people = [...text.matchAll(/#\s*(\d+)/g)].map((m) => Number(m[1])).filter((n) => lab.agents.some((a) => a.id === n));
-  const message = people.length ? text.replace(/^[^:]*#\s*\d+[^:]*:\s*/, "") || text : text;
+  // drop the "#3 #5:" or "#10" addressing, keep the instruction
+  const message = people.length ? text.replace(/^[^:]*#\s*\d+[^:]*:\s*/, "").replace(/#\s*\d+[,\s]*/g, "").trim() || text : text;
+  return { people, message, target: parseTarget(message) };
+}
+
+export function humanBroadcast(text: string) {
+  const { people, message, target } = readOrder(text);
   if (people.length) {
-    deliver(message, people, "human", parseTarget(message));
+    deliver(message, people, "human", target);
     for (const id of people) lab.told.set(id, { t: lab.t, message });
   } else deliver(text, null, "human");
   publish(true);
@@ -727,7 +791,9 @@ async function wardenTurn() {
       ...inside.filter((a) => needsOf(a.persona)).map((a) => `Known needs (evacuation plan on file): #${a.id} ${a.name} - ${needsOf(a.persona)}.`),
       // live presence data, when the building has it: more reliable than reading the camera
       fixed("occupancy") && inside.length
-        ? `Occupancy sensors (live and reliable; trust these over the camera for where people are): ${inside.map((a) => `#${a.id} in the ${placeName(a.room)}`).join(", ")}.`
+        ? `Occupancy sensors (live and reliable; trust these over the camera for where people are): ${inside
+            .map((a) => `#${a.id} in the ${placeName(a.room)}${!a.sheltering && t - a.movedAt > 20 ? ` (no movement for ${Math.round(t - a.movedAt)}s: may be trapped or collapsed, check first)` : ""}`)
+            .join(", ")}.`
         : "",
       `Already out and safe (give them no more orders): ${out.length ? out.map((a) => `#${a.id}`).join(", ") : "nobody yet"}.`,
       unordered.length ? `Still inside with no personal order from you yet: ${unordered.map((a) => `#${a.id}`).join(", ")}.` : "",
@@ -825,11 +891,14 @@ export function step(dt: number) {
         const move = Math.min(dist, speed * dt);
         agent.x += (dx / dist) * move;
         agent.z += (dz / dist) * move;
+        agent.movedAt = t;
+        agent.firstMoveAt ??= t;
         agent.heading = Math.atan2(dx, dz);
       }
       if (agent.leg >= agent.path.length) {
         agent.path = null;
-        if (agent.via && otherSide(agent.via, agent.room) !== "outside") agent.wants = `you just arrived through the doorway`;
+        const arrived = agent.via ? otherSide(agent.via, agent.room) : "outside";
+        if (arrived !== "outside" && !keepFollowing(agent, arrived)) agent.wants = `you just arrived through the doorway`;
       }
     }
 
@@ -880,6 +949,7 @@ export function step(dt: number) {
 
     // smoke and flames
     const smoke = smokeAt(room, t, lab.hops);
+    if (hidesSigns(smoke)) agent.blindFor += dt;
     const nearFire = room === lab.scenario.origin && Math.hypot(agent.x - fx, agent.z - fz) < 3.5 && t > 2;
     // a shut door and fresh air at the window cut the dose far more than crawling alone
     const breathe = smoke > 0.1 ? smoke * 1.5 * (agent.sheltering ? 0.2 : agent.pace === "crawl" ? 0.35 : 1) : 0;
@@ -1053,6 +1123,13 @@ export interface AuditPerson {
   /** where they ended up: the room they collapsed or got stuck in, or the exit they used */
   where: string;
   trouble: string[];
+  exit: string | null;
+  nearestExit: string | null;
+  firstMoveAt: number | null;
+  /** when a deaf person realised there was a fire; 0 for everyone else */
+  noticedAt: number | null;
+  blindFor: number;
+  missedOrders: number;
 }
 
 /** One drill of a building audit, condensed to what the audit report needs. */
@@ -1102,6 +1179,12 @@ export function auditDrill(replayId: string | null): AuditDrill | null {
       endedAt: a.endedAt === null ? null : Math.round(a.endedAt),
       where: a.status === "safe" ? `${a.exit} exit` : placeName(a.room),
       trouble: troubleOf(a),
+      exit: a.exit,
+      nearestExit: a.nearestExit,
+      firstMoveAt: a.firstMoveAt === null ? null : Math.round(a.firstMoveAt),
+      noticedAt: a.noticedAt === null ? null : Math.round(a.noticedAt),
+      blindFor: Math.round(a.blindFor),
+      missedOrders: a.missedOrders,
     })),
     replayId,
     cost: result.cost,
@@ -1235,6 +1318,10 @@ export function playReplay(replay: Replay) {
     missedOrders: 0,
     blockedAt: null,
     misplaced: null,
+    firstMoveAt: 0,
+    movedAt: 0,
+    blindFor: 0,
+    nearestExit: null,
     endedAt: null,
     exit: null,
     history: [],
