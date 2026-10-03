@@ -16,6 +16,7 @@ import { lab, step, useLab } from "./engine";
 import { create } from "zustand";
 import { fireSpot, floorHeight, INDOOR, LINKS, placeName, roomCenter, smokeAt, WEST_STEPS } from "./world";
 import Human from "./Human";
+import { hasFix } from "./fixes";
 
 /** Which person the spectator camera is riding along with, and whether the map is ready. */
 export const useSpectator = create<{ follow: number | null; navReady: boolean }>(() => ({ follow: null, navReady: false }));
@@ -25,29 +26,23 @@ export const useSpectator = create<{ follow: number | null; navReady: boolean }>
 /** Reads the walkable floor off the building's colliders once they have all mounted. */
 function NavBuilder() {
   const { world, rapier } = useRapier();
-  useEffect(() => {
-    let cancelled = false;
-    let last = -1;
-    let stable = 0;
-    // colliders mount over a few frames; wait until their count stops changing
-    const wait = window.setInterval(() => {
-      const count = world.colliders.len();
-      stable = count === last ? stable + 1 : 0;
-      last = count;
-      if (stable < 3 || cancelled) return;
-      window.clearInterval(wait);
-      world.step(); // refresh the query structures; only fixed bodies exist, so nothing moves
-      const shape = new rapier.Cuboid(0.24, 0.45, 0.24);
-      const rotation = { x: 0, y: 0, z: 0, w: 1 };
-      const probe = (x: number, z: number) => world.intersectionWithShape({ x, y: 0.9, z }, rotation, shape) !== null;
-      lab.grid = buildGrid(probe);
-      useSpectator.setState({ navReady: true });
-    }, 150);
-    return () => {
-      cancelled = true;
-      window.clearInterval(wait);
-    };
-  }, [world, rapier]);
+  // colliders mount over a few frames; build once their count has held steady for a few frames
+  const watch = useRef({ last: -1, stable: 0, done: false });
+  useFrame(() => {
+    const w = watch.current;
+    if (w.done) return;
+    const count = world.colliders.len();
+    w.stable = count === w.last ? w.stable + 1 : 0;
+    w.last = count;
+    if (w.stable < 4) return;
+    w.done = true;
+    world.step(); // refresh the query structures; only fixed bodies exist, so nothing moves
+    const shape = new rapier.Cuboid(0.24, 0.45, 0.24);
+    const rotation = { x: 0, y: 0, z: 0, w: 1 };
+    const probe = (x: number, z: number) => world.intersectionWithShape({ x, y: 0.9, z }, rotation, shape) !== null;
+    lab.grid = buildGrid(probe);
+    useSpectator.setState({ navReady: true });
+  });
   return null;
 }
 
@@ -79,7 +74,7 @@ function Person({ index }: { index: number }) {
     const g = group.current;
     if (!live || !g) return;
     const dt = clampDt(rawDt);
-    g.position.set(live.x, floorHeight(live.x, live.z), live.z);
+    g.position.set(live.x, floorHeight(live.x, live.z, hasFix(lab.config?.fixes, "ramp")), live.z);
     g.rotation.y += ((((live.heading - g.rotation.y + Math.PI * 3) % (Math.PI * 2)) - Math.PI) * Math.min(1, dt * 10));
   });
 
@@ -173,6 +168,7 @@ function People() {
 
 /** The landing and steps outside the west fire exit: the one way out a wheelchair cannot take. */
 function WestSteps() {
+  const ramped = useLab((st) => !!st.snap && hasFix(lab.config?.fixes, "ramp"));
   const s = WEST_STEPS;
   const concrete = useMemo(() => new THREE.MeshStandardMaterial({ color: "#a59f97", roughness: 0.92 }), []);
   const nosing = useMemo(() => new THREE.MeshBasicMaterial({ color: "#facc15", toneMapped: false }), []);
@@ -180,6 +176,26 @@ function WestSteps() {
     { from: 0, to: s.landing, h: s.rise * s.count },
     ...Array.from({ length: s.count - 1 }, (_, k) => ({ from: s.landing + k * s.tread, to: s.landing + (k + 1) * s.tread, h: s.rise * (s.count - k - 1) })),
   ];
+  if (ramped) {
+    const top = s.rise * s.count;
+    const run = s.rampLength;
+    return (
+      <group>
+        <mesh material={concrete} position={[s.fromX - s.landing / 2, top / 2, s.z]} receiveShadow>
+          <boxGeometry args={[s.landing, top, s.halfWidth * 2]} />
+        </mesh>
+        {/* a wedge: a thin slab tilted down from the landing to the lawn */}
+        <mesh material={concrete} position={[s.fromX - s.landing - run / 2, top / 2, s.z]} rotation={[0, 0, Math.atan2(top, run)]} receiveShadow>
+          <boxGeometry args={[Math.hypot(run, top), 0.06, s.halfWidth * 2]} />
+        </mesh>
+        <Html position={[s.fromX - 1.5, 1.3, s.z]} center zIndexRange={[5, 0]} style={{ pointerEvents: "none" }}>
+          <div style={{ font: "800 9px/1.2 var(--font-geist-sans), sans-serif", background: "rgba(22,17,30,0.8)", color: "#2fd18f", padding: "2px 6px", whiteSpace: "nowrap" }}>
+            Ramp · step-free
+          </div>
+        </Html>
+      </group>
+    );
+  }
   return (
     <group>
       {blocks.map((b, i) => (

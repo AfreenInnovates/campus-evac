@@ -4,7 +4,7 @@
  * no secrets in here.
  */
 
-export type CrowdTask = "evacuee" | "warden-see" | "warden-think" | "debrief";
+export type CrowdTask = "evacuee" | "warden-see" | "warden-think" | "debrief" | "advise";
 
 interface ModelSpec {
   model: string;
@@ -18,6 +18,16 @@ interface ModelSpec {
   /** extra request fields, e.g. switching a reasoning model's thinking off */
   extra?: Record<string, unknown>;
 }
+
+const ULTRA: ModelSpec = {
+  model: "nvidia/Nemotron-3-Ultra-550b-a55b",
+  label: "Nemotron 3 Ultra",
+  maxTokens: 5000,
+  temperature: 0.4,
+  json: true,
+  timeoutMs: 120_000,
+  price: { input: 1, output: 3 },
+};
 
 export const MODELS: Record<CrowdTask, ModelSpec> = {
   // many small, fast calls: one per person per decision
@@ -36,11 +46,13 @@ export const MODELS: Record<CrowdTask, ModelSpec> = {
   "warden-see": {
     model: "openbmb/MiniCPM-V-4_5",
     label: "MiniCPM-V 4.5 (vision)",
-    maxTokens: 380,
+    maxTokens: 600,
     temperature: 0.2,
     json: false,
     timeoutMs: 30_000,
     price: { input: 0.66, output: 1.11 },
+    // it thinks out loud by default and can spend the whole budget doing it on a big building
+    extra: { chat_template_kwargs: { enable_thinking: false } },
   },
   // the warden's judgement
   "warden-think": {
@@ -54,15 +66,9 @@ export const MODELS: Record<CrowdTask, ModelSpec> = {
     price: { input: 0.3, output: 0.9 },
   },
   // one careful read of the whole run afterwards
-  debrief: {
-    model: "nvidia/Nemotron-3-Ultra-550b-a55b",
-    label: "Nemotron 3 Ultra",
-    maxTokens: 5000,
-    temperature: 0.4,
-    json: true,
-    timeoutMs: 120_000,
-    price: { input: 1, output: 3 },
-  },
+  debrief: ULTRA,
+  // reads a whole building audit and decides what to change
+  advise: { ...ULTRA, temperature: 0.2 },
 };
 
 export const SYSTEM: Record<CrowdTask, string> = {
@@ -107,6 +113,13 @@ export const SYSTEM: Record<CrowdTask, string> = {
     "Return the improved playbook: keep rules that helped, rewrite rules that were unclear or ignored, drop rules that did not help, and add a rule for the most costly failure in this run.",
     "Rules must be general and actionable: imperative, at most 22 words, naming kinds of places, signs and exits - never person numbers, times or this run's specific fire room.",
     'Reply with ONLY a JSON object: {"verdict": "<one sentence>", "coordination_score": <0-10>, "what_worked": ["<at most 3 short points>"], "what_failed": ["<at most 3 short points>"], "warden_clarity": "<one sentence on how understandable the announcements were to people without a map>", "next_experiment": "<one concrete change to try in the next run>", "playbook": ["<at most 6 rules>"], "playbook_change": "<one sentence: what you changed in the playbook and why>"}',
+  ].join("\n"),
+
+  advise: [
+    "You are a fire-safety engineer advising a campus on its evacuation plan.",
+    "You are given the results of a simulated audit: the same occupants, a fire started in each room in turn, and who failed to get out or got out late and why. Occupants include a wheelchair user, a deaf student, a person who panics, an elderly person with a cane, a first-time visitor and someone wearing headphones.",
+    "You are also given a list of fixes the building can make, each with an id. Choose the fixes that address the failures you see, most important first. Only choose fixes that address an actual failure in the data, and cite it.",
+    'Reply with ONLY a JSON object: {"summary": "<two sentences: where this plan fails and for whom>", "fixes": [{"id": "<fix id>", "why": "<at most 25 words, citing the failure it addresses>"}], "beyond": ["<at most 3 further recommendations outside the list, at most 16 words each>"]}',
   ].join("\n"),
 };
 

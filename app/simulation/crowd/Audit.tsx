@@ -3,12 +3,16 @@
 import { useState } from "react";
 import { ROOMS, type RoomId } from "../level";
 import type { AuditDrill, LabConfig } from "./engine";
+import { FIXES, fixById, type FixId } from "./fixes";
+import { costOf } from "./prompts";
 import type { QueueItem } from "./Training";
 import { LINKS, placeName, SCENARIOS } from "./world";
 
 /**
  * The building audit: the same people, the fire started in every room in turn, and one
- * report on where the evacuation plan breaks and who it leaves behind.
+ * report on where the evacuation plan breaks and who it leaves behind. Then the fix: an AI
+ * advisor picks changes from what failed, and the failing fires are rerun with them, same
+ * people, same places, to prove whether they work.
  *
  * The numbers are pure functions of the recorded drills (`summariseAudit`); the panel only
  * draws them.
@@ -20,40 +24,68 @@ export interface AuditRun {
   at: number;
   seed: number;
   total: number;
+  /** none for the building as it is; the changes under test for a trial */
+  fixes: FixId[];
   drills: AuditDrill[];
 }
 
-const KEY = "campusevac:audit";
+type Which = "baseline" | "trial";
+const KEYS: Record<Which, string> = { baseline: "campusevac:audit", trial: "campusevac:audit-trial" };
 
-export function readAudit(): AuditRun | null {
+export function readAudit(which: Which = "baseline"): AuditRun | null {
   try {
-    return JSON.parse(localStorage.getItem(KEY) ?? "null") as AuditRun | null;
+    const run = JSON.parse(localStorage.getItem(KEYS[which]) ?? "null") as AuditRun | null;
+    return run && { ...run, fixes: run.fixes ?? [] };
   } catch {
     return null;
   }
 }
 
-function writeAudit(run: AuditRun) {
+function writeAudit(which: Which, run: AuditRun | null) {
   try {
-    localStorage.setItem(KEY, JSON.stringify(run));
+    if (run) localStorage.setItem(KEYS[which], JSON.stringify(run));
+    else localStorage.removeItem(KEYS[which]);
   } catch {
     /* the report still shows for this visit */
   }
 }
 
-/** Start a fresh audit and return the drills to queue: every fire, the same crowd. */
-export function beginAudit(seed: number, agents = 12): QueueItem[] {
-  writeAudit({ at: Date.now(), seed, total: SCENARIOS.length, drills: [] });
-  return SCENARIOS.map((scenario) => ({
-    config: { scenarioId: scenario.id, agents, warden: "ai", seed, wardenEvery: 12, playbook: true } satisfies LabConfig,
+/** The same crowd through each fire, with the given changes made to the building. */
+function drillsFor(seed: number, agents: number, scenarioIds: string[], fixes: FixId[]): QueueItem[] {
+  return scenarioIds.map((scenarioId) => ({
+    config: { scenarioId, agents, warden: "ai", seed, wardenEvery: 12, playbook: true, fixes } satisfies LabConfig,
     tag: "audit",
     learn: false,
   }));
 }
 
+/** Start a fresh audit and return the drills to queue: every fire, the same crowd. */
+export function beginAudit(seed: number, agents = 12): QueueItem[] {
+  writeAudit("baseline", { at: Date.now(), seed, total: SCENARIOS.length, fixes: [], drills: [] });
+  writeAudit("trial", null);
+  return drillsFor(seed, agents, SCENARIOS.map((scenario) => scenario.id), []);
+}
+
+/** The fires worth rerunning to prove a fix: wherever someone was lost, else wherever anyone had trouble. */
+export function firesToProve(run: AuditRun) {
+  const lost = run.drills.filter((d) => d.survived < d.agents);
+  const troubled = run.drills.filter((d) => d.people.some((p) => p.trouble.length));
+  return (lost.length ? lost : troubled.length ? troubled : run.drills).map((d) => d.scenarioId);
+}
+
+/** Rerun the failing fires of the last audit with the chosen fixes: same seed, so the same people in the same places. */
+export function beginTrial(fixes: FixId[]): QueueItem[] {
+  const base = readAudit();
+  if (!base) return [];
+  const fires = firesToProve(base);
+  writeAudit("trial", { at: Date.now(), seed: base.seed, total: fires.length, fixes, drills: [] });
+  return drillsFor(base.seed, base.drills[0]?.agents ?? 12, fires, fixes);
+}
+
 export function recordAuditDrill(drill: AuditDrill) {
-  const run = readAudit();
-  if (run) writeAudit({ ...run, drills: [...run.drills.filter((d) => d.scenarioId !== drill.scenarioId), drill] });
+  const which: Which = drill.fixes?.length ? "trial" : "baseline";
+  const run = readAudit(which);
+  if (run) writeAudit(which, { ...run, drills: [...run.drills.filter((d) => d.scenarioId !== drill.scenarioId), drill] });
 }
 
 /* ------------------------------------------------------------------ the numbers */
@@ -123,6 +155,198 @@ export function summariseAudit(run: AuditRun) {
   };
 }
 
+/* ------------------------------------------------------------------ the advisor */
+
+export interface Advice {
+  summary: string;
+  fixes: { id: FixId; why: string }[];
+  beyond: string[];
+  cost: number;
+}
+
+/** The audit in plain lines, for the advisor to read. */
+function describeAudit(report: ReturnType<typeof summariseAudit>) {
+  return [
+    `Audit: ${report.drills.length} fires, ${report.survived}/${report.total} people survived overall.`,
+    "",
+    "Each fire (worst first):",
+    ...report.drills.map(
+      (d) =>
+        `- ${d.scenario}: ${d.survived}/${d.agents} survived; exits used ${JSON.stringify(d.exits)}. ${d.people
+          .filter((p) => !p.survived || p.trouble.length)
+          .map((p) => `${p.label} ${p.survived ? "got out" : `LOST (${p.status} in ${p.where})`}${p.trouble.length ? `: ${p.trouble.join("; ")}` : ""}`)
+          .join(" | ")}`,
+    ),
+    "",
+    "By kind of person:",
+    ...report.risk.map((g) => `- ${g.label}: ${g.survived}/${g.seen} survived${g.meanOut !== null ? `, mean time out ${g.meanOut}s` : ""}${g.commonTrouble ? `; often: ${g.commonTrouble}` : ""}`),
+    `Everyone's mean time out: ${report.everyoneOut ?? "n/a"}s.`,
+    "",
+    "Fixes available (choose by id):",
+    ...FIXES.map((fix) => `- ${fix.id}: ${fix.title}. ${fix.detail} Helps: ${fix.helps}.`),
+  ].join("\n");
+}
+
+export async function askAdvisor(run: AuditRun): Promise<Advice> {
+  const response = await fetch("/api/crowd", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ task: "advise", input: describeAudit(summariseAudit(run)) }),
+  });
+  const body = (await response.json()) as { json?: { summary?: string; fixes?: { id?: string; why?: string }[]; beyond?: string[] }; error?: string; input?: number; output?: number };
+  if (!response.ok || !body.json) throw new Error(body.error ?? "no advice");
+  const known = new Set<string>(FIXES.map((fix) => fix.id));
+  return {
+    summary: String(body.json.summary ?? ""),
+    fixes: (body.json.fixes ?? []).filter((f) => known.has(String(f.id))).map((f) => ({ id: f.id as FixId, why: String(f.why ?? "") })),
+    beyond: (body.json.beyond ?? []).map(String).slice(0, 3),
+    cost: costOf("advise", body.input ?? 0, body.output ?? 0),
+  };
+}
+
+/* ------------------------------------------------------------------ before and after */
+
+/** The baseline, cut down to the fires the trial reran, against the trial itself. */
+export function compareTrial(base: AuditRun, trial: AuditRun) {
+  const fires = new Set(trial.drills.map((d) => d.scenarioId));
+  const before = summariseAudit({ ...base, drills: base.drills.filter((d) => fires.has(d.scenarioId)) });
+  const after = summariseAudit(trial);
+  const afterByKind = new Map(after.risk.map((g) => [g.kind, g]));
+  return {
+    before,
+    after,
+    fires: before.drills.map((d) => ({ before: d, after: trial.drills.find((t) => t.scenarioId === d.scenarioId)! })),
+    groups: before.risk.map((g) => ({ before: g, after: afterByKind.get(g.kind) })),
+  };
+}
+
+function Delta({ before, after, whole }: { before: number; after: number; whole: number }) {
+  const better = after > before;
+  const worse = after < before;
+  return (
+    <span className="font-mono">
+      {before}/{whole} → <b className={better ? "text-mint" : worse ? "text-danger" : "text-paper"}>{after}/{whole}</b>
+    </span>
+  );
+}
+
+function BeforeAfter({ base, trial, onWatch }: { base: AuditRun; trial: AuditRun; onWatch: (replayId: string, label: string) => void }) {
+  const c = compareTrial(base, trial);
+  return (
+    <div className="border-2 border-mint/60 bg-night/60 p-3">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-[11px] font-black uppercase tracking-[0.16em] text-mint">Proof: the same people, the same fires, with the fixes</h3>
+        <span className="text-[10px] text-paper/50">
+          {trial.drills.length < trial.total ? `${trial.drills.length} of ${trial.total} fires rerun so far` : `${trial.total} fires rerun`}
+        </span>
+      </div>
+      <p className="mt-1 text-[11px] text-paper/60">With: {trial.fixes.map((id) => fixById(id).title).join(" · ")}</p>
+      <div className="mt-2 grid gap-3 md:grid-cols-2">
+        <div>
+          <div className="text-[9px] font-black uppercase tracking-[0.14em] text-paper/45">Survived</div>
+          <div className="text-2xl font-black">
+            {pct(c.before.survived, c.before.total)}% → <span className="text-mint">{pct(c.after.survived, c.after.total)}%</span>
+          </div>
+          <ul className="mt-1 space-y-0.5 text-[12px]">
+            {c.fires.map(({ before, after }) => (
+              <li key={before.scenarioId} className="flex items-center justify-between gap-2">
+                <span className="truncate">{before.scenario}</span>
+                <span className="flex shrink-0 items-center gap-2">
+                  {after ? <Delta before={before.survived} after={after.survived} whole={before.agents} /> : <span className="text-paper/40">pending</span>}
+                  {after?.replayId && (
+                    <button onClick={() => onWatch(after.replayId!, `${before.scenario}, with fixes`)} className="text-[10px] font-black text-[#38bdf8] underline">
+                      watch
+                    </button>
+                  )}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div>
+          <div className="text-[9px] font-black uppercase tracking-[0.14em] text-paper/45">Who it helped</div>
+          <ul className="mt-1 space-y-0.5 text-[12px]">
+            {c.groups.map(({ before, after }) => (
+              <li key={before.kind} className="flex items-center justify-between gap-2">
+                <span className="truncate">
+                  {before.icon} {before.label}
+                </span>
+                {after ? <Delta before={before.survived} after={after.survived} whole={before.seen} /> : <span className="text-paper/40">pending</span>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ fix it */
+
+function FixAndProve({ run, busy, onProve }: { run: AuditRun; busy: boolean; onProve: (fixes: FixId[]) => void }) {
+  const [advice, setAdvice] = useState<Advice | "loading" | "error" | null>(null);
+  const [chosen, setChosen] = useState<Set<FixId>>(new Set());
+  const recommended = advice && typeof advice === "object" ? new Map(advice.fixes.map((f) => [f.id, f.why])) : new Map<FixId, string>();
+  const fires = firesToProve(run).length;
+  const toggle = (id: FixId) =>
+    setChosen((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  return (
+    <div className="border-2 border-sun/60 bg-night/60 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-[11px] font-black uppercase tracking-[0.16em] text-sun">Fix it, then prove it</h3>
+        <button
+          onClick={async () => {
+            setAdvice("loading");
+            try {
+              const next = await askAdvisor(run);
+              setAdvice(next);
+              setChosen(new Set(next.fixes.map((f) => f.id)));
+            } catch {
+              setAdvice("error");
+            }
+          }}
+          disabled={advice === "loading"}
+          className="border-2 border-sun px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.1em] text-sun hover:bg-sun hover:text-ink disabled:opacity-50"
+        >
+          {advice === "loading" ? "Nemotron Ultra is reading the audit…" : "Ask Nemotron Ultra what to fix"}
+        </button>
+      </div>
+      {advice === "error" && <p className="mt-1 text-[11px] text-danger">The advisor could not answer. Try again, or pick fixes yourself.</p>}
+      {advice && typeof advice === "object" && <p className="mt-2 text-[12px] leading-snug text-paper/80">{advice.summary}</p>}
+
+      <ul className="mt-2 grid gap-1.5 md:grid-cols-2">
+        {FIXES.map((fix) => (
+          <li key={fix.id}>
+            <label className={`flex cursor-pointer gap-2 border px-2 py-1.5 text-[12px] ${chosen.has(fix.id) ? "border-sun bg-sun/10" : "border-paper/15"}`}>
+              <input type="checkbox" checked={chosen.has(fix.id)} onChange={() => toggle(fix.id)} className="mt-0.5 accent-[var(--sun)]" />
+              <span>
+                <b>{fix.title}</b>
+                <span className="block text-[11px] text-paper/60">
+                  {recommended.has(fix.id) ? <span className="text-sun">Recommended: {recommended.get(fix.id)}</span> : `${fix.detail} Helps ${fix.helps}.`}
+                </span>
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+      {advice && typeof advice === "object" && advice.beyond.length > 0 && (
+        <p className="mt-2 text-[11px] text-paper/60">
+          <b className="text-paper/80">Also worth doing:</b> {advice.beyond.join(" · ")}
+        </p>
+      )}
+      <button onClick={() => onProve([...chosen])} disabled={busy || !chosen.size} className="brutal-button mt-3 px-4 py-2 disabled:opacity-50">
+        Prove it: rerun {fires} {fires === 1 ? "fire" : "fires"} with {chosen.size || "no"} {chosen.size === 1 ? "fix" : "fixes"}
+      </button>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ risk map */
 
 const riskColor = (rate: number) => (rate >= 100 ? "#2fd18f" : rate >= 85 ? "#facc15" : rate >= 65 ? "#fb923c" : "#ef4444");
@@ -170,15 +394,18 @@ function RiskMap({ byOrigin, exits }: { byOrigin: Map<RoomId, AuditDrill>; exits
 export default function AuditPanel({
   onClose,
   onRun,
+  onProve,
   onWatch,
   busy,
 }: {
   onClose: () => void;
   onRun: () => void;
+  onProve: (fixes: FixId[]) => void;
   onWatch: (replayId: string, label: string) => void;
   busy: boolean;
 }) {
-  const [run] = useState(readAudit);
+  const [run] = useState(() => readAudit());
+  const [trial] = useState(() => readAudit("trial"));
   const report = run && run.drills.length ? summariseAudit(run) : null;
   const worst = report?.drills[0];
 
@@ -296,6 +523,10 @@ export default function AuditPanel({
                   ))}
                 </tbody>
               </table>
+            </div>
+            <div className="mt-4 space-y-3">
+              {trial && trial.drills.length > 0 && <BeforeAfter base={run!} trial={trial} onWatch={onWatch} />}
+              {run!.drills.length === run!.total && <FixAndProve run={run!} busy={busy} onProve={onProve} />}
             </div>
             {Object.keys(report.lostAt).length > 0 && (
               <p className="mt-3 text-[12px] text-paper/70">

@@ -79,14 +79,16 @@ export function isSafe(x: number, z: number) {
 }
 
 /** The west fire exit opens onto a landing and three steps down to the lawn. */
-export const WEST_STEPS = { fromX: -22.1, landing: 0.6, tread: 0.42, rise: 0.15, count: 3, halfWidth: 1.1, z: WEST_EXIT_Z };
+export const WEST_STEPS = { fromX: -22.1, landing: 0.6, tread: 0.42, rise: 0.15, count: 3, halfWidth: 1.1, z: WEST_EXIT_Z, rampLength: 3.2 };
 
-/** How high the ground is under a point: zero everywhere except the west exit's steps. */
-export function floorHeight(x: number, z: number) {
+/** How high the ground is under a point: zero everywhere except outside the west exit, stepped or ramped. */
+export function floorHeight(x: number, z: number, ramped = false) {
   const s = WEST_STEPS;
   if (Math.abs(z - s.z) > s.halfWidth || x > s.fromX) return 0;
   const along = s.fromX - x;
-  if (along < s.landing) return s.rise * s.count;
+  const top = s.rise * s.count;
+  if (along < s.landing) return top;
+  if (ramped) return Math.max(0, top * (1 - (along - s.landing) / s.rampLength));
   const step = Math.floor((along - s.landing) / s.tread) + 1;
   return Math.max(0, s.rise * (s.count - step));
 }

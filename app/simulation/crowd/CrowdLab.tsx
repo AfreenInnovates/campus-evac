@@ -11,7 +11,7 @@ import { PortraitBlock } from "../components/PortraitBlock";
 import { enterLandscape } from "../orientation";
 import { adminKey, hydratePlaybook, nextDrillNumber, recordPoint, usePlaybook } from "./playbook";
 import { findReplay, replayById, saveReplay, shareReplay, type Replay } from "./replay";
-import AuditPanel, { beginAudit, recordAuditDrill } from "./Audit";
+import AuditPanel, { beginAudit, beginTrial, recordAuditDrill } from "./Audit";
 import TrainingPanel, { type QueueItem } from "./Training";
 import { Caption, PABanner, Scoreboard, useStory, VoiceToggle } from "./Story";
 import { pauseVoice, resumeVoice, setVoiceRate, speak, stopSpeaking } from "./voice";
@@ -779,7 +779,8 @@ export default function CrowdLab() {
         return;
       }
       setQueue({ ...queue, index: next });
-      window.setTimeout(() => start(queue.items[next].config), 1200);
+      // a Stop pressed during the pause between drills must win
+      window.setTimeout(() => queueRef.current && start(queue.items[next].config), 1200);
     };
     if (item.tag === "audit") {
       // an audit only records what happened; no review, no learning, nothing to wait for
@@ -1043,6 +1044,7 @@ export default function CrowdLab() {
           busy={!!queue}
           onClose={() => setShowAudit(false)}
           onRun={() => runQueue(beginAudit(freshSeed()), "Building audit")}
+          onProve={(fixes) => runQueue(beginTrial(fixes), "Proving the fixes")}
           onWatch={async (id, label) => {
             const replay = await replayById(id);
             if (replay) playRecorded(replay, label);

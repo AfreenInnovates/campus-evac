@@ -11,7 +11,7 @@ export const runtime = "nodejs";
  */
 
 const BASE_URL = process.env.NEBIUS_BASE_URL ?? "https://api.tokenfactory.nebius.com/v1";
-const TASKS: CrowdTask[] = ["evacuee", "warden-see", "warden-think", "debrief"];
+const TASKS: CrowdTask[] = ["evacuee", "warden-see", "warden-think", "debrief", "advise"];
 
 /* a coarse per-address budget, so a public demo cannot be used to burn the credits */
 const WINDOW_MS = 60_000;
@@ -99,8 +99,11 @@ export async function POST(request: Request) {
     choices?: { message?: { content?: string; reasoning_content?: string } }[];
     usage?: { prompt_tokens?: number; completion_tokens?: number };
   };
-  const text = payload.choices?.[0]?.message?.content?.trim() ?? "";
-  const reasoning = payload.choices?.[0]?.message?.reasoning_content?.trim() ?? "";
+  // some models think inline in <think> tags; keep that as reasoning and answer with what follows
+  const raw = payload.choices?.[0]?.message?.content ?? "";
+  const inline = raw.match(/<think>([\s\S]*?)(<\/think>|$)/);
+  const text = raw.replace(/<think>[\s\S]*?(<\/think>|$)/, "").trim();
+  const reasoning = (payload.choices?.[0]?.message?.reasoning_content ?? inline?.[1] ?? "").trim();
   if (!text)
     return NextResponse.json(
       { error: reasoning ? "The model ran out of tokens while still thinking" : "Empty answer", input: payload.usage?.prompt_tokens ?? 0, output: payload.usage?.completion_tokens ?? 0 },

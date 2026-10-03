@@ -6,6 +6,7 @@ import { cellOf, findPath, walkable, type NavGrid } from "./nav";
 import { costOf, type CrowdTask } from "./prompts";
 import { adoptRules, nextDrillNumber, standingOrders, usePlaybook } from "./playbook";
 import { judge, parseTarget, type Order, type Target } from "./orders";
+import { hasFix, type FixId } from "./fixes";
 import { FIELDS, FRAME_EVERY, ORDER, PACE, STATUS, type Replay } from "./replay";
 import {
   compass,
@@ -128,7 +129,7 @@ function castPeople(count: number, random: () => number): Persona[] {
 
 /** What the warden's records say about a person, the way a real Personal Emergency Evacuation Plan would. */
 export function needsOf(persona: Persona) {
-  if (persona.stepFree) return "wheelchair user: needs a step-free route; cannot use the WEST FIRE EXIT (steps)";
+  if (persona.stepFree) return `wheelchair user: needs a step-free route${fixed("ramp") ? "" : "; cannot use the WEST FIRE EXIT (steps)"}`;
   if (persona.deaf) return "deaf: cannot hear the alarm or the PA; an order only reaches them if someone in the same room passes it on";
   if (persona.kind === "elderly") return "elderly, walks with a cane: slow, cannot crawl";
   return "";
@@ -201,6 +202,8 @@ export interface LabConfig {
   wardenEvery: number;
   /** give the AI warden the standing orders learned from earlier drills */
   playbook: boolean;
+  /** changes made to the building or the plan, for testing whether they help */
+  fixes?: FixId[];
 }
 
 export interface WardenTurn {
@@ -279,6 +282,12 @@ export const lab = {
   /** playback speed; live drills always run in real time */
   speed: 1,
 };
+
+/** Whether this run's building has a given fix in place. */
+const fixed = (id: FixId) => hasFix(lab.config?.fixes, id);
+
+/** A doorway this person physically cannot use: steps, for a wheelchair, unless they were ramped. */
+const impassable = (agent: Agent, link: Link) => !!agent.persona.stepFree && !!link.steps && !fixed("ramp");
 
 const indexOf = (table: string[], ids: Map<string, number>, text: string) => {
   let id = ids.get(text);
@@ -401,21 +410,21 @@ export function setupRun(config: LabConfig) {
       leg: 0,
       via: null,
       thought: "…",
-      action: "hears the alarm",
+      action: persona.deaf && !fixed("strobes") ? "carries on, unaware of the alarm" : "hears the alarm",
       deciding: false,
       decisions: 0,
       lastDecisionAt: -99,
       // a deaf person does not know anything is wrong until they see it
-      wants: persona.deaf ? null : "the fire alarm just went off",
+      wants: persona.deaf && !fixed("strobes") ? null : persona.deaf ? "the fire alarm strobe lights just started flashing" : "the fire alarm just went off",
       heard: [],
       pendingHear: [],
       visited: [room],
       smokeSeen: 0,
       sheltering: false,
       order: null,
-      frozenUntil: persona.panics ? 4 + random() * 5 : 0,
+      frozenUntil: persona.panics ? (fixed("voice-alarm") ? 2 + random() * 2.5 : 4 + random() * 5) : 0,
       frozenFor: 0,
-      noticedAt: persona.deaf ? null : 0,
+      noticedAt: persona.deaf && !fixed("strobes") ? null : 0,
       missedOrders: 0,
       blockedAt: null,
       endedAt: null,
@@ -478,10 +487,11 @@ function perceive(agent: Agent) {
   const smokeHere = smokeAt(here, t, lab.hops);
   const origin = lab.scenario!.origin;
   // in thick smoke you cannot read a sign or see past a doorway: you need someone to tell you
-  const blind = smokeHere > 0.45;
+  // low-level glowing signs stay readable under smoke that hides the ones overhead
+  const blind = smokeHere > (fixed("low-signs") ? 0.8 : 0.45);
   const persona = agent.persona;
   // a wheelchair cannot go down steps: that doorway is not an option, only a dead end in view
-  const steps = persona.stepFree ? linksOf(here).filter((link) => link.steps) : [];
+  const steps = linksOf(here).filter((link) => impassable(agent, link));
   if (steps.length && !agent.blockedAt) agent.blockedAt = placeName(here);
   const options = linksOf(here).filter((link) => !steps.includes(link)).map((link, i) => {
     const beyond = otherSide(link, here);
@@ -528,10 +538,12 @@ function perceive(agent: Agent) {
       persona.deaf
         ? heard.length
           ? `You are deaf. Messages someone passed on to you in person (newest first):\n${heard.join("\n")}`
-          : "You are deaf: you hear nothing at all, no alarm and no announcement, so never say you heard something. You only know what you can see."
+          : `You are deaf: you hear nothing at all, no alarm and no announcement, so never say you heard something. You only know what you can see${fixed("strobes") ? ", and the fire alarm strobe lights are flashing" : ""}.`
         : heard.length
           ? `Announcements you have heard (newest first):\n${heard.join("\n")}`
-          : "You have not heard any announcement yet, only the alarm.",
+          : fixed("voice-alarm")
+            ? 'The alarm is a recorded voice: "Fire reported in the building. Leave now by the nearest exit, away from smoke."'
+            : "You have not heard any announcement yet, only the alarm.",
       persona.panics ? "Your heart is pounding and it is hard to think straight; you badly want to do whatever the people nearest you are doing." : "",
       persona.canCrawl === false ? "You cannot get down onto the floor to crawl." : "",
       `Rooms you have been in, in order: ${agent.visited.map(placeName).join(" -> ")}.`,
@@ -601,7 +613,7 @@ async function decide(agent: Agent) {
     agent.thought = message === "run budget reached" ? "(budget reached)" : "(could not think: model error)";
     // keep going on instinct: head for the nearest doorway that is not towards the fire
     if (!agent.path) {
-      const escape = linksOf(agent.room).filter((link) => !(agent.persona.stepFree && link.steps)).sort((a, b) => smokeAt(otherSide(a, agent.room), lab.t, lab.hops) - smokeAt(otherSide(b, agent.room), lab.t, lab.hops))[0];
+      const escape = linksOf(agent.room).filter((link) => !impassable(agent, link)).sort((a, b) => smokeAt(otherSide(a, agent.room), lab.t, lab.hops) - smokeAt(otherSide(b, agent.room), lab.t, lab.hops))[0];
       if (escape) goThrough(agent, escape);
     }
     if (reason) agent.wants = null;
@@ -631,7 +643,7 @@ const PLAN = (() => {
   return [
     "Building plan (single storey). Compass: north is the top of the camera image, south the bottom, west the left, east the right. Evacuees use the same compass words.",
     ...[...rooms.entries()].map(([room, list]) => `- ${placeName(room as RoomId)} connects to: ${list.join("; ")}`),
-    "Exits: MAIN EXIT (south, through the Main Entrance, step-free), WEST FIRE EXIT (Library west wall; opens onto steps down, so no wheelchair can use it), EAST FIRE EXIT (Cafeteria east wall, step-free), NORTH FIRE EXIT (Sports Hall north wall, step-free, out to the sports field). The north wing (Lecture Theatre, Computer Lab, Sports Hall) is reached only through the North Corridor, from the Main Hall or the Cafeteria. The Electrical Service room is a dead end.",
+    "Exits: MAIN EXIT (south, through the Main Entrance, step-free), WEST FIRE EXIT (Library west wall; WEST_STEPS), EAST FIRE EXIT (Cafeteria east wall, step-free), NORTH FIRE EXIT (Sports Hall north wall, step-free, out to the sports field). The north wing (Lecture Theatre, Computer Lab, Sports Hall) is reached only through the North Corridor, from the Main Hall or the Cafeteria. The Electrical Service room is a dead end.",
   ].join("\n");
 })();
 
@@ -642,6 +654,10 @@ function deliver(text: string, people: number[] | null, kind: "warden" | "human"
     if (agent.status !== "inside") continue;
     const direct = !!people?.includes(agent.id);
     if (people && !direct) continue;
+    if (agent.persona.deaf && fixed("text-alerts")) {
+      agent.pendingHear.push({ t: lab.t + 3, text: `(text alert on your phone) ${clean}`, direct, target: direct ? target : null });
+      continue;
+    }
     if (agent.persona.deaf) {
       // the PA means nothing to them; an order by name only arrives if someone beside them passes it on
       if (!direct) continue;
@@ -653,7 +669,9 @@ function deliver(text: string, people: number[] | null, kind: "warden" | "human"
       agent.pendingHear.push({ t: lab.t + 5, text: `(${helper.name} taps your shoulder and points, passing on the warden's message) ${clean}`, direct, target });
       continue;
     }
-    agent.pendingHear.push({ t: lab.t + agent.persona.hearingDelay, text: clean, direct, target: direct ? target : null });
+    // a spoken alarm system is louder and clearer than a bell: headphones let less of it slip by
+    const delay = fixed("voice-alarm") ? Math.min(agent.persona.hearingDelay, 3) : agent.persona.hearingDelay;
+    agent.pendingHear.push({ t: lab.t + delay, text: clean, direct, target: direct ? target : null });
   }
   note(kind, people ? `To #${people.join(", #")}: “${clean}”` : `PA: “${clean}”`, undefined, { type: "announce", text: clean, people });
 }
@@ -701,7 +719,7 @@ async function wardenTurn() {
       : "";
     const think = await callModel(
       "warden-think",
-      [PLAN, "", ...(lab.orders ? [lab.orders, ""] : []), status, ...(memory ? ["", memory] : []), "", "CCTV analyst report of the newest frame:", turn.report || "(no report)", "", previous.length ? `Your previous announcements:\n${previous.join("\n")}` : "You have made no announcements yet."].join("\n"),
+      [PLAN.replace("WEST_STEPS", fixed("ramp") ? "ramped, step-free" : "opens onto steps down, so no wheelchair can use it"), "", ...(lab.orders ? [lab.orders, ""] : []), status, ...(memory ? ["", memory] : []), "", "CCTV analyst report of the newest frame:", turn.report || "(no report)", "", previous.length ? `Your previous announcements:\n${previous.join("\n")}` : "You have made no announcements yet."].join("\n"),
     );
     if (runId !== lab.runId) return;
     turn.reasoning = think.reasoning ?? "";
@@ -829,7 +847,7 @@ export function step(dt: number) {
     // outside the walls but not yet clear: keep walking to the nearest exit's safe point
     if (room === "outside") {
       if (!agent.path) {
-        const exits = LINKS.filter((link) => link.exit && !(agent.persona.stepFree && link.steps));
+        const exits = LINKS.filter((link) => link.exit && !impassable(agent, link));
         const exit = agent.via?.exit ? agent.via : exits.sort((a, b) => Math.hypot(a.pb[0] - agent.x, a.pb[1] - agent.z) - Math.hypot(b.pb[0] - agent.x, b.pb[1] - agent.z))[0];
         agent.path = (lab.grid && findPath(lab.grid, [agent.x, agent.z], exit.pb)) || [exit.pb];
         agent.leg = 0;
@@ -1016,6 +1034,7 @@ export interface AuditPerson {
 /** One drill of a building audit, condensed to what the audit report needs. */
 export interface AuditDrill {
   at: number;
+  fixes: FixId[];
   scenarioId: string;
   scenario: string;
   origin: RoomId;
@@ -1037,6 +1056,7 @@ export function auditDrill(replayId: string | null): AuditDrill | null {
   const out = lab.agents.filter((a) => a.status === "safe").map((a) => a.endedAt ?? 0);
   return {
     at: Date.now(),
+    fixes: lab.config?.fixes ?? [],
     scenarioId: lab.scenario.id,
     scenario: lab.scenario.label,
     origin: lab.scenario.origin,
