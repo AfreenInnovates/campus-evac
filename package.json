@@ -17,7 +17,7 @@
     "infra:synth": "npm --prefix infra run synth",
     "infra:deploy": "npm --prefix infra run deploy",
     "voice": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/synth-voice.mts",
-    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test"
+    "test": "node --import tsx --test"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.958.0",
@@ -46,6 +46,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",
+    "tsx": "^4.23.15",
     "typescript": "^5"
   }
 }

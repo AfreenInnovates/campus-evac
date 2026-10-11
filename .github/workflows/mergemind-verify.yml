@@ -91,7 +91,7 @@ jobs:
           mapfile -d '' added < <(git diff --name-only -z --diff-filter=A "$BASE_SHA" HEAD -- "${src[@]}" "${excl[@]}")
 
           echo "::group::1. new tests with the fix"
-          node --test -- "${tests[@]}" || { echo "::error::the new tests fail with the fix"; exit 1; }
+          node --import tsx --test -- "${tests[@]}" || { echo "::error::the new tests fail with the fix"; exit 1; }
           echo "::endgroup::"
 
           if [ ${#modified[@]} -eq 0 ] && [ ${#added[@]} -eq 0 ]; then
@@ -100,7 +100,7 @@ jobs:
           echo "::group::2. same tests with the code reset to the base branch"
           if [ ${#modified[@]} -gt 0 ]; then git checkout "$BASE_SHA" -- "${modified[@]}"; fi
           if [ ${#added[@]} -gt 0 ]; then rm -f -- "${added[@]}"; fi
-          if node --test -- "${tests[@]}"; then
+          if node --import tsx --test -- "${tests[@]}"; then
             echo "::error::the new tests also pass without the fix, so they don't test it"; exit 1
           fi
           echo "::endgroup::"
