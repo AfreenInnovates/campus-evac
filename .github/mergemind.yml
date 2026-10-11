@@ -1,0 +1,17 @@
+autonomy: merge                 # observe | suggest | invite | merge
+maintainers: [AfreenInnovates]
+access:
+  mode: fork                    # contributors fork and open a PR; they never get write access
+  ttl: 3d
+  checkin_at: 50%
+  min_account_age: 30d
+pr:
+  require_regression_test: true # a new *.test.ts must fail without the fix
+  test_commands: ["npm test"]
+  allow_out_of_scope: flag
+  merge_method: squash
+  ci_timeout: 30m
+  post_merge_watch: 30m
+guard:
+  sensitive_paths: [".env*", "**/.env*", "**/*.pem", "**/*.key",
+                    "**/secrets/**", "deploy/**", "infra/**"]

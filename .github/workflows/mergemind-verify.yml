@@ -1,0 +1,107 @@
+# MergeMind: untrusted PR tests, adapted from the Python template for this Node/TypeScript repo.
+# Runs contributor code with a read-only token and no secrets. MergeMind reads the results of the
+# `tests` and `regression` jobs as check runs; it never runs PR code itself.
+# Tests are `*.test.ts` files run by Node's built-in runner (`npm test` = `node --test`).
+name: mergemind-verify
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  # the default branch is tested after every merge; MergeMind proposes a revert if this fails
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mergemind-verify-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Full test suite
+        run: npm test
+
+  detect:
+    name: detect-tests
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_tests: ${{ steps.find.outputs.has_tests }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: find
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # file names are contributor-controlled: never interpolate them into scripts
+          if git diff --name-only --diff-filter=AM "$BASE_SHA" HEAD -- '*.test.ts' '*.test.mts' '*.test.js' '*.test.mjs' | grep -q .; then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  regression:
+    name: regression
+    needs: detect
+    if: github.event_name == 'pull_request' && needs.detect.outputs.has_tests == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+      - name: Install
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: New tests fail without the fix and pass with it
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          NODE_OPTIONS: --disable-warning=MODULE_TYPELESS_PACKAGE_JSON
+        run: |
+          set -euo pipefail
+          tests_spec=('*.test.ts' '*.test.mts' '*.test.js' '*.test.mjs')
+          excl=(':(exclude)*.test.ts' ':(exclude)*.test.mts' ':(exclude)*.test.js' ':(exclude)*.test.mjs')
+          src=('*.ts' '*.tsx' '*.mts' '*.js' '*.jsx' '*.mjs' '*.cjs')
+          mapfile -d '' tests < <(git diff --name-only -z --diff-filter=AM "$BASE_SHA" HEAD -- "${tests_spec[@]}")
+          mapfile -d '' modified < <(git diff --name-only -z --diff-filter=MR "$BASE_SHA" HEAD -- "${src[@]}" "${excl[@]}")
+          mapfile -d '' added < <(git diff --name-only -z --diff-filter=A "$BASE_SHA" HEAD -- "${src[@]}" "${excl[@]}")
+
+          echo "::group::1. new tests with the fix"
+          node --test -- "${tests[@]}" || { echo "::error::the new tests fail with the fix"; exit 1; }
+          echo "::endgroup::"
+
+          if [ ${#modified[@]} -eq 0 ] && [ ${#added[@]} -eq 0 ]; then
+            echo "::error::the PR changes no code for the tests to check"; exit 1
+          fi
+          echo "::group::2. same tests with the code reset to the base branch"
+          if [ ${#modified[@]} -gt 0 ]; then git checkout "$BASE_SHA" -- "${modified[@]}"; fi
+          if [ ${#added[@]} -gt 0 ]; then rm -f -- "${added[@]}"; fi
+          if node --test -- "${tests[@]}"; then
+            echo "::error::the new tests also pass without the fix, so they don't test it"; exit 1
+          fi
+          echo "::endgroup::"
+          echo "regression test confirmed: fails without the fix, passes with it"

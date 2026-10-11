@@ -16,7 +16,8 @@
     "infra:bootstrap": "npm --prefix infra run bootstrap",
     "infra:synth": "npm --prefix infra run synth",
     "infra:deploy": "npm --prefix infra run deploy",
-    "voice": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/synth-voice.mts"
+    "voice": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON scripts/synth-voice.mts",
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.958.0",
