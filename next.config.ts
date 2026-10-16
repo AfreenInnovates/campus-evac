@@ -22,6 +22,8 @@ const contentSecurityPolicy = [
   "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
+  // Polly speech arrives as a blob and plays through an <audio> element (Crowd Lab, Echo page)
+  "media-src 'self' blob:",
   "font-src 'self'",
   `connect-src 'self' ${realtimeOrigin} ${httpOrigin}`.replace(/\s+/g, " ").trim(),
   "worker-src 'self' blob:",
@@ -34,7 +36,8 @@ const contentSecurityPolicy = [
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
+  // the Echo page listens through the browser's speech recognition, which needs this site's own mic
+  { key: "Permissions-Policy", value: "camera=(), microphone=(self), geolocation=()" },
   ...(process.env.NODE_ENV === "production"
     ? [
         { key: "Content-Security-Policy", value: contentSecurityPolicy },

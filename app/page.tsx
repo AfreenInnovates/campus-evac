@@ -2,7 +2,6 @@ import Link from "next/link";
 import Image from "next/image";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
-  AiBrain01Icon,
   AlarmSmokeIcon,
   ArrowRight02Icon,
   Backpack01Icon,
@@ -71,7 +70,7 @@ const OBJECTIVES = [
 const STACK = [
   { name: "AppSync Events", icon: WifiConnected01Icon, body: "Managed WebSocket pub/sub. Lobby, warden commands and 12 position updates a second." },
   { name: "DynamoDB", icon: Database01Icon, body: "Every lobby action and command written as an event log, expired after seven days." },
-  { name: "Bedrock", icon: AiBrain01Icon, body: "Optional Nova narration for the briefing, with an authored fallback when it is off." },
+  { name: "Polly", icon: Megaphone01Icon, body: "Amazon Polly voices the narrated briefing and the live coaching that follows you through the drill." },
 ];
 
 /* -- page --------------------------------------------------------------- */
