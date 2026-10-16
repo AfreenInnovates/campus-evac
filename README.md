@@ -273,4 +273,4 @@ What we found while building, for the feedback fields:
 
 ## License
 
-[MIT](LICENSE). Copyright 2026 Akshay R and Afreen, the CampusEvac team.
+[MIT](LICENSE). Copyright 2026 Akshay R Abhishek M S and Afreen Hossain, the CampusEvac team.
