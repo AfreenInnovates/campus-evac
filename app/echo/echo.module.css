@@ -1,0 +1,111 @@
+/* The Echo seen from above: a fabric puck with a light ring around its rim. */
+
+.device {
+  position: relative;
+  width: min(68vw, 240px);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 42%, #3a3442 0%, #26212d 58%, #1b1720 100%);
+  box-shadow:
+    0 30px 60px rgba(0, 0, 0, 0.55),
+    inset 0 2px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* the fabric: a fine dot grid */
+.device::after {
+  content: "";
+  position: absolute;
+  inset: 12%;
+  border-radius: 50%;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1.4px);
+  background-size: 7px 7px;
+}
+
+.ring {
+  position: absolute;
+  inset: -3px;
+  border-radius: 50%;
+  padding: 7px;
+  /* only the rim shows: a ring, not a disc */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+  transition: opacity 0.3s ease;
+  opacity: 0;
+}
+
+.idle {
+  opacity: 0;
+}
+
+.listening {
+  opacity: 1;
+  background: conic-gradient(from 0deg, #1f6fff, #2fd6ff, #1f6fff, #2fd6ff, #1f6fff);
+}
+
+.thinking {
+  opacity: 1;
+  background: conic-gradient(from 0deg, #1238a8 0deg, #1238a8 250deg, #2fd6ff 300deg, #b9f3ff 330deg, #1238a8 360deg);
+  animation: spin 1.1s linear infinite;
+}
+
+.speaking {
+  opacity: 1;
+  background: conic-gradient(from 0deg, #2fd6ff, #1f6fff, #2fd6ff);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.notify {
+  opacity: 1;
+  background: conic-gradient(from 0deg, #ffc44d, #ffe08a, #ffc44d);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.error {
+  opacity: 1;
+  background: #ef3b4b;
+}
+
+.glow {
+  position: absolute;
+  inset: -18%;
+  border-radius: 50%;
+  pointer-events: none;
+  filter: blur(28px);
+  opacity: 0;
+  transition:
+    opacity 0.4s ease,
+    background 0.4s ease;
+}
+
+.glowOn {
+  opacity: 0.35;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thinking,
+  .speaking,
+  .notify {
+    animation: none;
+  }
+}

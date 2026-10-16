@@ -5,12 +5,13 @@ import { NextResponse } from "next/server";
 export const runtime = "nodejs";
 
 /**
- * Speech for the Crowd Lab: the warden's PA announcements and the narrator's progress lines,
- * spoken by Amazon Polly.
+ * Speech for the Crowd Lab and the Echo page: the warden's PA announcements, the narrator's
+ * progress lines and the assistant's answers, spoken by Amazon Polly.
  *
- * The warden's words come from a model, so this accepts text - but only a short line, from
- * one of two fixed voices, under a per-address budget. The same line is spoken often (the
- * narrator repeats itself across runs), so audio is cached by its hash.
+ * The warden's words come from a model, so this accepts text - but only a short line (a
+ * longer one for the Echo page's assistant), from one of three fixed voices, under a
+ * per-address budget. The same line is spoken often (the narrator repeats itself across
+ * runs), so audio is cached by its hash.
  */
 
 const VOICES = {
@@ -18,9 +19,13 @@ const VOICES = {
   warden: { VoiceId: "Matthew", rate: "100%" },
   // the narrator explaining what is happening
   narrator: { VoiceId: "Joanna", rate: "105%" },
+  // the voice assistant on the Echo page, which reads out whole routes and drill results
+  assistant: { VoiceId: "Joanna", rate: "100%" },
 } as const;
 
 const MAX_CHARS = 280;
+/** A spoken route or drill result runs longer than a PA line; still well under Polly's limit. */
+const MAX_ASSISTANT_CHARS = 1500;
 const MAX_CACHE = 300;
 const cache = new Map<string, Buffer>();
 
@@ -51,8 +56,9 @@ export async function POST(request: Request) {
   } catch {
     return NextResponse.json({ error: "Malformed request" }, { status: 400 });
   }
-  const text = typeof body.text === "string" ? body.text.replace(/\s+/g, " ").trim().slice(0, MAX_CHARS) : "";
-  const voice = body.voice === "warden" ? "warden" : "narrator";
+  const voice = body.voice === "warden" ? "warden" : body.voice === "assistant" ? "assistant" : "narrator";
+  const limit = voice === "assistant" ? MAX_ASSISTANT_CHARS : MAX_CHARS;
+  const text = typeof body.text === "string" ? body.text.replace(/\s+/g, " ").trim().slice(0, limit) : "";
   if (!text) return NextResponse.json({ error: "Nothing to say" }, { status: 400 });
 
   const key = createHash("sha256").update(`${voice}|${text}`).digest("hex");

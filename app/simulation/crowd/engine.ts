@@ -1,5 +1,3 @@
-"use client";
-
 import { create } from "zustand";
 import { cellOf, findPath, walkable, withBlockedDisc, type NavGrid } from "./nav";
 import { costOf, type CrowdTask } from "./prompts";
@@ -294,6 +292,11 @@ export const lab = {
   usage: { calls: 0, failures: 0, ms: 0, cost: 0, byTask: {} } as Usage,
   /** set by the canvas: renders the CCTV frame and returns it as a JPEG data URL */
   capture: null as null | (() => Promise<string | null>),
+  /**
+   * Set when a drill runs on the server: makes each model call directly instead of through
+   * /api/crowd, and gives the warden the building's sensors in place of a camera.
+   */
+  headless: null as null | { model: (task: CrowdTask, input: string) => Promise<{ status: number; body: ModelReply }> },
   runId: 0,
   /** the standing orders this run's warden was given, fixed at the start of the run */
   orders: "",
@@ -546,15 +549,35 @@ function note(kind: LogEntry["kind"], text: string, agent?: number, event?: LabE
 
 /* ------------------------------------------------------------------ model calls */
 
+interface ModelReply {
+  text?: string;
+  reasoning?: string;
+  json?: unknown;
+  ms?: number;
+  input?: number;
+  output?: number;
+  error?: string;
+}
+
 async function callModel(task: CrowdTask, input: string, image?: string) {
   if (lab.usage.cost >= RUN_BUDGET_USD) throw new Error("run budget reached");
   const runId = lab.runId;
-  const response = await fetch("/api/crowd", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ task, input, image }),
-  });
-  const body = (await response.json()) as { text?: string; reasoning?: string; json?: unknown; ms?: number; input?: number; output?: number; error?: string };
+  let ok: boolean;
+  let body: ModelReply;
+  if (lab.headless) {
+    const reply = await lab.headless.model(task, input);
+    ok = reply.status === 200;
+    body = reply.body;
+  } else {
+    const response = await fetch("/api/crowd", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ task, input, image }),
+    });
+    ok = response.ok;
+    body = (await response.json()) as ModelReply;
+    if (!ok && !body.error) body.error = `HTTP ${response.status}`;
+  }
   if (runId !== lab.runId) throw new Error("stale");
   const entry = (lab.usage.byTask[task] ??= { calls: 0, cost: 0 });
   lab.usage.calls++;
@@ -563,9 +586,9 @@ async function callModel(task: CrowdTask, input: string, image?: string) {
   const cost = costOf(task, body.input ?? 0, body.output ?? 0);
   lab.usage.cost += cost;
   entry.cost += cost;
-  if (!response.ok || body.error) {
+  if (!ok || body.error) {
     lab.usage.failures++;
-    throw new Error(body.error ?? `HTTP ${response.status}`);
+    throw new Error(body.error ?? "model call failed");
   }
   lab.usage.ms += body.ms ?? 0;
   return body;
@@ -807,7 +830,8 @@ function deliver(text: string, people: number[] | null, kind: "warden" | "human"
     }
     // an order that starts from the wrong room: the warden misread where this person is
     const named = direct ? firstRoomNamed(clean) : null;
-    if (named && named !== agent.room && !(target?.kind === "room" && target.room === named)) agent.misplaced = { said: placeName(named), was: placeName(agent.room) };
+    // someone already through an exit door is not misplaced, only not yet clear of the building
+    if (named && named !== agent.room && agent.room !== "outside" && !(target?.kind === "room" && target.room === named)) agent.misplaced = { said: placeName(named), was: placeName(agent.room) };
     // a spoken alarm system is louder and clearer than a bell: headphones let less of it slip by
     const delay = fixed("voice-alarm") ? Math.min(agent.persona.hearingDelay, 3) : agent.persona.hearingDelay;
     agent.pendingHear.push({ t: lab.t + delay, text: clean, direct, target: direct ? target : null });
@@ -848,6 +872,30 @@ function crowdRollCall() {
     .join(", ")}.`;
 }
 
+/**
+ * The building's own sensors, read out in the same form as the CCTV analyst's report: smoke
+ * and heat detectors in every room, and people counted by badge and Wi-Fi presence. A drill run
+ * on the server has no camera to look through, so this is what its warden sees.
+ */
+function sensorReport() {
+  const lines: string[] = [];
+  for (const room of INDOOR) {
+    const smoke = smokeAt(room, lab.t, lab.hops);
+    const people = lab.agents.filter((a) => a.status === "inside" && a.room === room).map((a) => a.id);
+    const fire = room === lab.scenario?.origin && lab.t > 2;
+    if (!people.length && smoke < 0.08 && !fire) continue;
+    const level = smoke < 0.08 ? "none" : smoke < 0.45 ? "light" : "heavy";
+    lines.push(`${placeName(room).toUpperCase()}: fire ${fire ? "yes" : "no"}; smoke ${level}; people: ${people.length ? people.join(", ") : "none"}`);
+  }
+  const exits = LINKS.filter((link) => link.exit).map((link) => {
+    const room = link.a === "outside" ? link.b : link.a;
+    const smoke = smokeAt(room, lab.t, lab.hops);
+    return `${link.exit!.toUpperCase()} ${room === lab.scenario?.origin ? "inside the fire room" : smoke > 0.45 ? "smoky" : "clear"}`;
+  });
+  lines.push(`EXITS: ${exits.join(", ")}.`);
+  return `(building sensors, not a camera)\n${lines.join("\n")}`;
+}
+
 async function wardenTurn() {
   const runId = lab.runId;
   lab.wardenBusy = true;
@@ -855,11 +903,14 @@ async function wardenTurn() {
   const turn: WardenTurn = { t, image: null, report: "", reasoning: "", assessment: "", broadcast: "", directives: [], ms: 0 };
   const started = performance.now();
   try {
-    const image = (await lab.capture?.()) ?? null;
-    if (!image) throw new Error("camera not ready");
-    turn.image = image;
-    const seen = await callModel("warden-see", `CCTV frame at ${Math.round(t)}s after the alarm.`, image);
-    turn.report = (seen.text ?? "").slice(0, 1200);
+    if (lab.headless) turn.report = sensorReport();
+    else {
+      const image = (await lab.capture?.()) ?? null;
+      if (!image) throw new Error("camera not ready");
+      turn.image = image;
+      const seen = await callModel("warden-see", `CCTV frame at ${Math.round(t)}s after the alarm.`, image);
+      turn.report = (seen.text ?? "").slice(0, 1200);
+    }
     const previous = lab.warden.slice(-4).map((w) => `- at ${Math.round(w.t)}s: ${w.broadcast ? `"${w.broadcast}"` : "(no announcement)"}${w.directives.map((d) => ` / to #${d.people.join(",#")}: "${d.message}"`).join("")}`);
     const inside = lab.agents.filter((a) => a.status === "inside");
     const out = lab.agents.filter((a) => a.status === "safe");

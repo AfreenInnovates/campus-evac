@@ -1,28 +1,18 @@
-import { DeleteItemCommand, DynamoDBClient, GetItemCommand, PutItemCommand, QueryCommand } from "@aws-sdk/client-dynamodb";
+import { DeleteItemCommand, GetItemCommand, PutItemCommand, QueryCommand } from "@aws-sdk/client-dynamodb";
 import { NextResponse } from "next/server";
+import { db, PK, readShared, TABLE } from "./store";
 
 export const runtime = "nodejs";
 
 /**
  * The warden's shared memory: one playbook and its training history, so everyone who opens
- * the Crowd Lab meets the same trained warden.
- *
- * Rows live in the existing events table under their own partition:
- *   pk "warden", sk "playbook"            the current playbook
- *   pk "warden", sk "point#<drill>#<at>"  one row per drill on the learning curve
+ * the Crowd Lab meets the same trained warden. Where the rows live is in ./store.
  *
  * Anyone can read. Writing needs WARDEN_ADMIN_KEY when it is set, so a visitor cannot
  * retrain or wipe the warden that judges are about to look at.
  */
 
-const REGION = process.env.WARDEN_REGION?.trim() || process.env.SES_REGION?.trim() || process.env.AWS_REGION?.trim() || "ap-south-1";
-const TABLE = process.env.WARDEN_TABLE?.trim() || process.env.REPORTS_TABLE?.trim() || "campusevac-events";
 const ADMIN_KEY = process.env.WARDEN_ADMIN_KEY?.trim() ?? "";
-const PK = { S: "warden" };
-const MAX_POINTS = 200;
-
-let client: DynamoDBClient | null = null;
-const db = () => (client ??= new DynamoDBClient({ region: REGION }));
 
 const drillKey = (drill: unknown) => String(Math.max(0, Math.floor(Number(drill) || 0))).padStart(5, "0");
 
@@ -41,20 +31,8 @@ export async function GET(request: Request) {
     }
   }
   try {
-    const [playbook, points] = await Promise.all([
-      db().send(new GetItemCommand({ TableName: TABLE, Key: { pk: PK, sk: { S: "playbook" } } })),
-      db().send(
-        new QueryCommand({
-          TableName: TABLE,
-          KeyConditionExpression: "pk = :pk AND begins_with(sk, :point)",
-          ExpressionAttributeValues: { ":pk": PK, ":point": { S: "point#" } },
-          Limit: MAX_POINTS,
-        }),
-      ),
-    ]);
     return NextResponse.json({
-      playbook: playbook.Item?.data?.S ? JSON.parse(playbook.Item.data.S) : null,
-      history: (points.Items ?? []).map((item) => JSON.parse(item.data?.S ?? "null")).filter(Boolean),
+      ...(await readShared()),
       locked: !!ADMIN_KEY,
     });
   } catch (error) {

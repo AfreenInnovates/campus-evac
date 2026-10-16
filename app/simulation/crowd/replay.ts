@@ -1,5 +1,3 @@
-"use client";
-
 import type { LabConfig, LogEntry, Persona, RunResult } from "./engine";
 
 /**
