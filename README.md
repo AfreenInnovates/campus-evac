@@ -248,11 +248,6 @@ The tests never start a drill or write to DynamoDB, so they cost nothing.
 
 ## For the judges
 
-### Nebius × NVIDIA Global AI Hackathon
-
-- **Track:** Best Apps and Agents.
-- **NVIDIA models on Token Factory:** Nemotron 3 Nano, Super and Ultra, each matched to the size of its job (see [the table above](#how-we-use-nvidia-nemotron-on-nebius-token-factory)). Hundreds of small Nano calls make up the crowd, Super does the warden's reasoning and the voice agent's tool use, and Ultra does the slow, careful review that teaches the warden.
-
 ### Build, Ship, Shape: Amazon Developer Hackathon
 
 - **Track:** Alexa+, both ways in: a self-hosted MCP server (protocol `2025-11-25`, Streamable HTTP, including MCP Tasks) in [app/mcp/](app/mcp/) and [app/api/mcp/route.ts](app/api/mcp/route.ts), and a simulated Alexa+ experience at `/echo` whose agent calls that server.
